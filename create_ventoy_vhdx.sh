@@ -216,7 +216,7 @@ done
 echo -e "\n${BLUE}${BOLD}[2/5] VHDX Configuration${NC}"
 read -e -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
 OUT_DIR=${OUT_DIR:-"$(pwd)"}
-OUT_DIR="${OUT_DIR/#\~/$HOME}"
+OUT_DIR="${OUT_DIR/#\~/$HOME}"; OUT_DIR="${OUT_DIR%/}"
 mkdir -p "$OUT_DIR"
 
 AVAIL_KB=$(df -P "$OUT_DIR" | awk 'NR==2 {print $4}')
@@ -232,7 +232,7 @@ fi
 read -rp "Enter output VHDX filename [default: Win11.vhdx]: " VHDX_NAME
 VHDX_NAME=${VHDX_NAME:-"Win11.vhdx"}
 [[ "$VHDX_NAME" != *.vhdx ]] && VHDX_NAME="${VHDX_NAME}.vhdx"
-FINAL_VHDX_PATH="$OUT_DIR/$VHDX_NAME"
+FINAL_VHDX_PATH="${OUT_DIR:-.}/$VHDX_NAME"
 
 if [ -f "$FINAL_VHDX_PATH" ]; then
     echo -e "${YELLOW}File '$FINAL_VHDX_PATH' already exists.${NC}"

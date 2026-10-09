@@ -190,7 +190,7 @@ try {
     Write-Color "`n[2/5] VHDX Configuration" Green
     $defaultOutDir = (Get-Location).Path
     $outDirInput = Read-HostWithTab "Enter output directory [default: $defaultOutDir]"
-    $outDir = if ([string]::IsNullOrWhiteSpace($outDirInput)) { $defaultOutDir } else { $outDirInput.Trim('"', "'", " ") }
+    $outDir = if ([string]::IsNullOrWhiteSpace($outDirInput)) { $defaultOutDir } else { $outDirInput.Trim('"', "'", " ").TrimEnd('/\') }
     if (-not (Test-Path $outDir)) {
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     }
