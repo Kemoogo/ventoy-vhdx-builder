@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
 # ==============================================================================
-# Script: create_ventoy_vhdx.sh (Robust & Bulletproof Edition)
+# Script: create_ventoy_vhdx.sh (Industrial-Grade Robust & Force-Kill Safe)
 # Features:
-#   - Dynamic NBD device allocation (finds first free /dev/nbd device)
-#   - Supports .wim, .esd, and directly mounting .iso files
-#   - XML-safe escaping for passwords and special characters
-#   - Disk space pre-flight validation
-#   - udevadm / partx synchronization to prevent kernel partition race conditions
-#   - Handles preexisting output files safely
-#   - Full trap & cleanup on error/exit
-#   - "portable operating system 1" branding & complete OOBE bypass
+#   - Full Process Group & Signal Trap handling (INT, TERM, HUP, QUIT, EXIT)
+#   - Process Killer for child background tasks (wimapply, qemu-nbd, wget)
+#   - Force-unmount & Lazy-unmount (umount -l / fuser -km) to kill busy locks
+#   - Incomplete artifact cleanup (deletes half-written VHDX on cancellation)
+#   - Dynamic free NBD discovery & force-disconnect on abort
+#   - Direct ISO / WIM / ESD support
+#   - XML-safe escaping & "portable operating system 1" branding
+#   - Pre-flight disk space validation & udevadm synchronization
 # ==============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # UI Color Codes
 RED='\033[0;31m'
@@ -24,39 +24,93 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Dynamic tracking variables for cleanup
+# Dynamic tracking variables
 MOUNT_DIR=""
 ISO_MOUNT_DIR=""
 ALLOCATED_NBD=""
-TEMP_WIM_PATH=""
+FINAL_VHDX_PATH=""
+ACTIVE_CHILD_PID=""
+OPERATION_COMPLETED=false
 
+# ------------------------------------------------------------------------------
+# Robust Cleanup & Force Termination Routine
+# ------------------------------------------------------------------------------
 cleanup() {
-    echo -e "\n${YELLOW}[!] Cleaning up resources...${NC}"
-    
-    # 1. Unmount VHD partition
-    if [ -n "$MOUNT_DIR" ] && mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-        echo " - Unmounting VHD filesystem..."
-        sudo sync
-        sudo umount -f "$MOUNT_DIR" 2>/dev/null || true
-    fi
-    [ -n "$MOUNT_DIR" ] && [ -d "$MOUNT_DIR" ] && sudo rmdir "$MOUNT_DIR" 2>/dev/null || true
+    local exit_code=$?
+    # Temporarily ignore signals during cleanup to avoid recursion
+    trap '' INT TERM HUP QUIT EXIT
 
-    # 2. Disconnect NBD
+    if [ "$OPERATION_COMPLETED" = false ]; then
+        echo -e "\n${RED}${BOLD}[!] INTERRUPT OR FAILURE DETECTED! INITIATING FORCED CLEANUP...${NC}"
+    else
+        echo -e "\n${GREEN}[*] Finalizing and cleaning temporary mounts...${NC}"
+    fi
+
+    # 1. Kill any running child process (e.g. wimapply, wget, qemu-img)
+    if [ -n "$ACTIVE_CHILD_PID" ] && kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null; then
+        echo -e "${YELLOW} - Terminating running background process (PID: $ACTIVE_CHILD_PID)...${NC}"
+        sudo kill -TERM "$ACTIVE_CHILD_PID" 2>/dev/null || true
+        sleep 1
+        sudo kill -KILL "$ACTIVE_CHILD_PID" 2>/dev/null || true
+    fi
+
+    # Kill any dangling wimapply processes spawned under this script
+    sudo pkill -P $$ 2>/dev/null || true
+
+    # 2. Release & Force-unmount VHD directory
+    if [ -n "$MOUNT_DIR" ]; then
+        if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
+            echo -e "${YELLOW} - Unmounting VHD filesystem ($MOUNT_DIR)...${NC}"
+            # Kill processes locking the mount point
+            if command -v fuser &>/dev/null; then
+                sudo fuser -km "$MOUNT_DIR" 2>/dev/null || true
+            fi
+            sudo sync
+            sudo umount "$MOUNT_DIR" 2>/dev/null || sudo umount -l "$MOUNT_DIR" 2>/dev/null || true
+        fi
+        [ -d "$MOUNT_DIR" ] && sudo rmdir "$MOUNT_DIR" 2>/dev/null || true
+    fi
+
+    # 3. Disconnect NBD device with retry & force fallback
     if [ -n "$ALLOCATED_NBD" ] && [ -b "$ALLOCATED_NBD" ]; then
-        echo " - Disconnecting NBD device $ALLOCATED_NBD..."
+        echo -e "${YELLOW} - Disconnecting virtual disk device ($ALLOCATED_NBD)...${NC}"
         sudo qemu-nbd --disconnect "$ALLOCATED_NBD" 2>/dev/null || true
+        # In case device is stubborn, force reset
+        if [ -b "${ALLOCATED_NBD}p1" ]; then
+            sleep 1
+            sudo blockdev --flushbufs "$ALLOCATED_NBD" 2>/dev/null || true
+            sudo qemu-nbd --disconnect "$ALLOCATED_NBD" 2>/dev/null || true
+        fi
     fi
 
-    # 3. Unmount ISO if mounted
-    if [ -n "$ISO_MOUNT_DIR" ] && mountpoint -q "$ISO_MOUNT_DIR" 2>/dev/null; then
-        echo " - Unmounting temporary ISO mount..."
-        sudo umount -f "$ISO_MOUNT_DIR" 2>/dev/null || true
+    # 4. Release ISO mount
+    if [ -n "$ISO_MOUNT_DIR" ]; then
+        if mountpoint -q "$ISO_MOUNT_DIR" 2>/dev/null; then
+            echo -e "${YELLOW} - Unmounting source ISO ($ISO_MOUNT_DIR)...${NC}"
+            if command -v fuser &>/dev/null; then
+                sudo fuser -km "$ISO_MOUNT_DIR" 2>/dev/null || true
+            fi
+            sudo umount -l "$ISO_MOUNT_DIR" 2>/dev/null || true
+        fi
+        [ -d "$ISO_MOUNT_DIR" ] && sudo rmdir "$ISO_MOUNT_DIR" 2>/dev/null || true
     fi
-    [ -n "$ISO_MOUNT_DIR" ] && [ -d "$ISO_MOUNT_DIR" ] && sudo rmdir "$ISO_MOUNT_DIR" 2>/dev/null || true
+
+    # 5. Remove incomplete/corrupted VHDX if operation was cancelled
+    if [ "$OPERATION_COMPLETED" = false ] && [ -n "$FINAL_VHDX_PATH" ] && [ -f "$FINAL_VHDX_PATH" ]; then
+        echo -e "${YELLOW} - Removing incomplete/corrupted VHDX image: $FINAL_VHDX_PATH${NC}"
+        sudo rm -f "$FINAL_VHDX_PATH" 2>/dev/null || true
+    fi
+
+    if [ "$OPERATION_COMPLETED" = false ]; then
+        echo -e "${RED}[!] Force cleanup completed. Safe to retry.${NC}"
+        exit 130
+    fi
 }
-trap cleanup EXIT INT TERM
 
-# Helper: Escape XML special characters
+# Trap all termination signals
+trap cleanup INT TERM HUP QUIT EXIT
+
+# XML Escape Helper
 escape_xml() {
     local str="$1"
     str="${str//&/&amp;}"
@@ -67,13 +121,12 @@ escape_xml() {
     printf '%s' "$str"
 }
 
-# Helper: Find free NBD device
+# Find free NBD slot
 find_free_nbd() {
     sudo modprobe nbd max_part=16
     for i in {0..15}; do
         local dev="/dev/nbd$i"
         if [ -b "$dev" ]; then
-            # Check size; size 0 indicates it is not mapped
             local size
             size=$(cat "/sys/block/nbd$i/size" 2>/dev/null || echo "0")
             if [ "$size" -eq 0 ] && ! grep -q "$dev" /proc/mounts; then
@@ -97,22 +150,17 @@ if ! sudo -v &>/dev/null; then
     exit 1
 fi
 
-# Check Dependencies
+# Check Tools
 REQUIRED_TOOLS=("qemu-img" "qemu-nbd" "wimapply" "wiminfo" "parted" "mkfs.ntfs" "udevadm")
-MISSING_TOOLS=()
 for cmd in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
-        MISSING_TOOLS+=("$cmd")
+        echo -e "${RED}[ERROR] Missing dependency: $cmd${NC}"
+        echo -e "${YELLOW}Install via: sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc wget unzip${NC}"
+        exit 1
     fi
 done
 
-if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
-    echo -e "${RED}[ERROR] Missing dependencies: ${MISSING_TOOLS[*]}${NC}"
-    echo -e "${YELLOW}Install via: sudo apt install qemu-utils wimtools parted ntfs-3g udev wget unzip${NC}"
-    exit 1
-fi
-
-# Step 1: Image source (.wim, .esd, or .iso)
+# Step 1: Image source
 echo -e "${BLUE}${BOLD}[1/5] Image Source (.wim / .esd / .iso)${NC}"
 while true; do
     read -rp "Enter path to Windows ISO, install.wim, or install.esd: " SRC_PATH
@@ -126,9 +174,8 @@ done
 
 ACTUAL_IMAGE_PATH="$SRC_PATH"
 
-# If input is an ISO, mount it to locate install.wim or install.esd
 if [[ "$SRC_PATH" =~ \.[iI][sS][oO]$ ]]; then
-    echo -e "${CYAN}[*] ISO detected. Mounting temporarily to extract WIM/ESD path...${NC}"
+    echo -e "${CYAN}[*] ISO detected. Mounting temporarily...${NC}"
     ISO_MOUNT_DIR="/mnt/iso_tmp_$$"
     sudo mkdir -p "$ISO_MOUNT_DIR"
     sudo mount -o loop,ro "$SRC_PATH" "$ISO_MOUNT_DIR"
@@ -138,13 +185,13 @@ if [[ "$SRC_PATH" =~ \.[iI][sS][oO]$ ]]; then
     elif [ -f "$ISO_MOUNT_DIR/sources/install.esd" ]; then
         ACTUAL_IMAGE_PATH="$ISO_MOUNT_DIR/sources/install.esd"
     else
-        echo -e "${RED}[ERROR] Neither install.wim nor install.esd found in the provided ISO.${NC}"
+        echo -e "${RED}[ERROR] Neither install.wim nor install.esd found in the ISO.${NC}"
         exit 1
     fi
-    echo -e "${GREEN}Found image inside ISO: $ACTUAL_IMAGE_PATH${NC}"
+    echo -e "${GREEN}Found valid image inside ISO: $ACTUAL_IMAGE_PATH${NC}"
 fi
 
-# Display available image editions
+# List editions
 echo -e "\n${CYAN}Available Editions:${NC}"
 wiminfo "$ACTUAL_IMAGE_PATH" | grep -E "Index:|Name:|Architecture:" || true
 echo ""
@@ -161,18 +208,17 @@ while true; do
     echo -e "${RED}Invalid index. Must be between 1 and $TOTAL_IMAGES.${NC}"
 done
 
-# Step 2: VHDX Options & Overwrite Handling
+# Step 2: Output Configuration
 echo -e "\n${BLUE}${BOLD}[2/5] VHDX Configuration${NC}"
 read -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
 OUT_DIR=${OUT_DIR:-"$(pwd)"}
 mkdir -p "$OUT_DIR"
 
-# Free disk space check in destination directory
 AVAIL_KB=$(df -P "$OUT_DIR" | awk 'NR==2 {print $4}')
 AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
 if [ "$AVAIL_GB" -lt 20 ]; then
-    echo -e "${YELLOW}[WARNING] Destination directory has only ${AVAIL_GB}GB free. It is recommended to have at least 25GB free.${NC}"
-    read -rp "Do you still want to proceed? [y/N]: " PROCEED_SPACE
+    echo -e "${YELLOW}[WARNING] Destination directory has only ${AVAIL_GB}GB free space. (At least 25GB recommended)${NC}"
+    read -rp "Proceed anyway? [y/N]: " PROCEED_SPACE
     if [[ ! "$PROCEED_SPACE" =~ ^[Yy]$ ]]; then
         exit 1
     fi
@@ -187,7 +233,7 @@ if [ -f "$FINAL_VHDX_PATH" ]; then
     echo -e "${YELLOW}File '$FINAL_VHDX_PATH' already exists.${NC}"
     read -rp "Overwrite existing file? [y/N]: " OVERWRITE
     if [[ ! "$OVERWRITE" =~ ^[Yy]$ ]]; then
-        echo -e "${RED}Aborted to prevent overwriting existing file.${NC}"
+        echo -e "${RED}Aborted by user.${NC}"
         exit 1
     fi
     rm -f "$FINAL_VHDX_PATH"
@@ -196,7 +242,7 @@ fi
 read -rp "Enter VHDX max expandable size in GB [default: 100]: " VHDX_SIZE
 VHDX_SIZE=${VHDX_SIZE:-100}
 
-# Step 3: OOBE User Credentials & Safe Escaping
+# Step 3: User Accounts
 echo -e "\n${BLUE}${BOLD}[3/5] User & System Configuration${NC}"
 read -rp "Enter Local Username [default: karim]: " USER_NAME
 USER_NAME=${USER_NAME:-"karim"}
@@ -207,7 +253,6 @@ USER_PASS=${USER_PASS:-""}
 read -rp "Enter Computer/Machine Name [default: PORTABLE-PC]: " COMPUTER_NAME
 COMPUTER_NAME=${COMPUTER_NAME:-"PORTABLE-PC"}
 
-# XML Escaped values
 XML_USER=$(escape_xml "$USER_NAME")
 XML_PASS=$(escape_xml "$USER_PASS")
 XML_COMP=$(escape_xml "$COMPUTER_NAME")
@@ -230,51 +275,53 @@ fi
 echo -e "\n${BLUE}[*] Step 1: Creating expandable VHDX (${VHDX_SIZE}G)...${NC}"
 qemu-img create -f vhdx "$FINAL_VHDX_PATH" "${VHDX_SIZE}G"
 
-# Step 5: Allocate free NBD device
+# Step 5: Connect NBD
 echo -e "${BLUE}[*] Step 2: Allocating free NBD device...${NC}"
 if ! ALLOCATED_NBD=$(find_free_nbd); then
-    echo -e "${RED}[ERROR] No free NBD devices available. Try disconnecting existing ones or rebooting.${NC}"
+    echo -e "${RED}[ERROR] No free NBD devices available.${NC}"
     exit 1
 fi
-echo -e "${GREEN}Using device: $ALLOCATED_NBD${NC}"
+echo -e "${GREEN}Connected device: $ALLOCATED_NBD${NC}"
 
 sudo qemu-nbd --connect="$ALLOCATED_NBD" "$FINAL_VHDX_PATH"
 sudo udevadm settle
 
-# Step 6: Partition and format with sync protection
+# Step 6: Partitioning
 echo -e "${BLUE}[*] Step 3: Partitioning GPT and formatting NTFS...${NC}"
 sudo parted -s "$ALLOCATED_NBD" mklabel gpt
 sudo parted -s "$ALLOCATED_NBD" mkpart primary ntfs 1MiB 100%
 sudo udevadm settle
 sleep 1
 
-# Ensure partition device exists
 PART_DEV="${ALLOCATED_NBD}p1"
 if [ ! -b "$PART_DEV" ]; then
-    echo -e "${YELLOW}Partition device node not visible yet, refreshing with partx...${NC}"
+    echo -e "${YELLOW}Refreshing partition table...${NC}"
     sudo partx -u "$ALLOCATED_NBD" 2>/dev/null || true
     sudo udevadm settle
 fi
 
 if [ ! -b "$PART_DEV" ]; then
-    echo -e "${RED}[ERROR] Partition $PART_DEV was not created properly.${NC}"
+    echo -e "${RED}[ERROR] Partition device node $PART_DEV failed to appear.${NC}"
     exit 1
 fi
 
 sudo mkfs.ntfs -f -L "VHDWindows" "$PART_DEV"
 
-# Step 7: Mount filesystem
+# Step 7: Mounting
 echo -e "${BLUE}[*] Step 4: Mounting filesystem...${NC}"
 MOUNT_DIR="/mnt/vhdwin_tmp_$$"
 sudo mkdir -p "$MOUNT_DIR"
 sudo mount "$PART_DEV" "$MOUNT_DIR"
 
-# Step 8: Apply image
+# Step 8: Apply image with process monitoring
 echo -e "${BLUE}[*] Step 5: Applying image index $WIM_INDEX to VHDX...${NC}"
-sudo wimapply "$ACTUAL_IMAGE_PATH" "$WIM_INDEX" "$MOUNT_DIR"
+sudo wimapply "$ACTUAL_IMAGE_PATH" "$WIM_INDEX" "$MOUNT_DIR" &
+ACTIVE_CHILD_PID=$!
+wait "$ACTIVE_CHILD_PID"
+ACTIVE_CHILD_PID=""
 
 # Step 9: Inject unattended XML
-echo -e "${BLUE}[*] Step 6: Creating unattended answer file (portable operating system 1)...${NC}"
+echo -e "${BLUE}[*] Step 6: Injecting unattended OOBE bypass...${NC}"
 sudo mkdir -p "$MOUNT_DIR/Windows/Panther" "$MOUNT_DIR/Windows/System32/Sysprep"
 
 cat <<INNER_EOF | sudo tee "$MOUNT_DIR/Windows/Panther/unattend.xml" > /dev/null
@@ -335,7 +382,7 @@ sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/Windows/System32/S
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/autounattend.xml"
 
 # Step 10: EFI Bootloader
-echo -e "${BLUE}[*] Step 7: Configuring UEFI Bootloader...${NC}"
+echo -e "${BLUE}[*] Step 7: Setting up UEFI boot structure...${NC}"
 sudo mkdir -p "$MOUNT_DIR/EFI/Boot" "$MOUNT_DIR/EFI/Microsoft/Boot"
 if [ -d "$MOUNT_DIR/Windows/Boot/EFI" ]; then
     sudo cp -r "$MOUNT_DIR/Windows/Boot/EFI/"* "$MOUNT_DIR/EFI/Microsoft/Boot/" 2>/dev/null || true
@@ -344,20 +391,26 @@ if [ -d "$MOUNT_DIR/Windows/Boot/EFI" ]; then
     fi
 fi
 
-# Step 11: Cleanup mounts cleanly
-echo -e "${BLUE}[*] Step 8: Syncing disk cache...${NC}"
+# Step 11: Safely unmount and detach
+echo -e "${BLUE}[*] Step 8: Syncing filesystem cache...${NC}"
 sudo sync
 sudo umount "$MOUNT_DIR"
-MOUNT_DIR="" # Prevent trap duplicate umount
+MOUNT_DIR=""
 sudo qemu-nbd --disconnect "$ALLOCATED_NBD"
 ALLOCATED_NBD=""
 sudo udevadm settle
 
-# Fix output permissions
+# Unmount ISO if active
+if [ -n "$ISO_MOUNT_DIR" ]; then
+    sudo umount -l "$ISO_MOUNT_DIR" 2>/dev/null || true
+    sudo rmdir "$ISO_MOUNT_DIR" 2>/dev/null || true
+    ISO_MOUNT_DIR=""
+fi
+
 sudo chown "$USER:$USER" "$FINAL_VHDX_PATH"
 
-# Step 12: Download Ventoy Plugin Helper
-echo -e "${BLUE}[*] Step 9: Checking Ventoy vhdboot plugin...${NC}"
+# Step 12: Ventoy Plugin
+echo -e "${BLUE}[*] Step 9: Preparing Ventoy vhdboot plugin...${NC}"
 if [ ! -f "$OUT_DIR/ventoy_vhdboot.img" ]; then
     echo -e "${YELLOW}Downloading Ventoy vhdboot plugin...${NC}"
     TMP_ZIP="/tmp/ventoy_vhdboot_$$.zip"
@@ -366,26 +419,24 @@ if [ ! -f "$OUT_DIR/ventoy_vhdboot.img" ]; then
         unzip -qo "$TMP_ZIP" -d "$TMP_DIR"
         if [ -f "$TMP_DIR/ventoy_vhdboot/Win10Based/ventoy_vhdboot.img" ]; then
             cp "$TMP_DIR/ventoy_vhdboot/Win10Based/ventoy_vhdboot.img" "$OUT_DIR/ventoy_vhdboot.img"
-            echo -e "${GREEN}Plugin ventoy_vhdboot.img saved successfully.${NC}"
+            echo -e "${GREEN}ventoy_vhdboot.img prepared successfully.${NC}"
         fi
         rm -rf "$TMP_ZIP" "$TMP_DIR"
-    else
-        echo -e "${RED}[WARNING] Could not auto-download ventoy_vhdboot.img due to network timeout.${NC}"
-        echo -e "You can download it manually from: https://github.com/ventoy/vhdiso/releases"
     fi
-else
-    echo -e "${GREEN}ventoy_vhdboot.img already present in $OUT_DIR.${NC}"
 fi
 
+# Mark completed so cleanup won't wipe the file
+OPERATION_COMPLETED=true
+
 echo -e "\n${GREEN}${BOLD}=========================================================="
-echo "                 ALL DONE SUCCESSFULLY!                   "
+echo "                 PROCESS COMPLETED SUCCESSFULLY!          "
 echo "==========================================================${NC}"
 echo -e "VHDX Image    : ${BOLD}$FINAL_VHDX_PATH${NC}"
 echo -e "Ventoy Plugin : ${BOLD}$OUT_DIR/ventoy_vhdboot.img${NC}"
 echo ""
-echo -e "${YELLOW}Next Steps for Ventoy:${NC}"
-echo "1. On your Ventoy USB drive, create a folder named 'ventoy' in root."
-echo "2. Copy 'ventoy_vhdboot.img' into that '/ventoy/' folder."
-echo "3. Copy '$(basename "$FINAL_VHDX_PATH")' to your Ventoy USB."
-echo "4. Boot from Ventoy -> Select VHDX -> Enjoy Windows 11 without OOBE!"
+echo -e "${YELLOW}Ventoy Instructions:${NC}"
+echo "1. On Ventoy USB, create folder 'ventoy' in root."
+echo "2. Copy 'ventoy_vhdboot.img' to '/ventoy/' folder."
+echo "3. Copy '$(basename "$FINAL_VHDX_PATH")' anywhere on Ventoy USB."
+echo "4. Boot from Ventoy and enjoy portable Windows!"
 echo "=========================================================="
