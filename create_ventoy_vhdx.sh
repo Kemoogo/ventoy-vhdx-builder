@@ -302,11 +302,9 @@ echo -e "${BLUE}[*] Step 3: Partitioning Windows GPT layout (MSR + NTFS)...${NC}
 sudo parted -s "$ALLOCATED_NBD" mklabel gpt
 # Partition 1: 16MB Microsoft Reserved (MSR) Partition
 sudo parted -s "$ALLOCATED_NBD" mkpart primary 2048s 34815s
-sudo parted -s "$ALLOCATED_NBD" name 1 "Microsoft reserved partition"
 sudo parted -s "$ALLOCATED_NBD" set 1 msftres on
 # Partition 2: NTFS OS Data Partition
 sudo parted -s "$ALLOCATED_NBD" mkpart primary ntfs 34816s 100%
-sudo parted -s "$ALLOCATED_NBD" name 2 "Basic data partition"
 sudo parted -s "$ALLOCATED_NBD" set 2 msftdata on
 sudo udevadm settle
 sleep 1
