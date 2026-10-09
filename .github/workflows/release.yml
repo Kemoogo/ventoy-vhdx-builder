@@ -1,0 +1,31 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Package Release ZIP
+        run: |
+          mkdir -p release_dist
+          zip -j release_dist/ventoy-vhdx-builder-${{ github.ref_name }}.zip \
+            create_ventoy_vhdx.sh \
+            create_ventoy_vhdx.ps1 \
+            run_windows.bat \
+            README.md \
+            LICENSE
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_dist/ventoy-vhdx-builder-${{ github.ref_name }}.zip
+          generate_release_notes: true
