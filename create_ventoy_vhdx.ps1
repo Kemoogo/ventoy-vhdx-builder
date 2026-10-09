@@ -229,8 +229,9 @@ try {
 
     # 4. User and OOBE Settings
     Write-Color "`n[3/5] User & System Configuration" Green
-    $usernameInput = Read-Host "Enter Local Username [default: karim]"
-    $username = if ([string]::IsNullOrWhiteSpace($usernameInput)) { "karim" } else { $usernameInput.Trim() }
+    $detectedUser = if ($env:USERNAME) { $env:USERNAME } else { "Admin" }
+    $usernameInput = Read-Host "Enter Local Username [default: $detectedUser]"
+    $username = if ([string]::IsNullOrWhiteSpace($usernameInput)) { $detectedUser } else { $usernameInput.Trim() }
 
     $userPass = Read-Host "Enter Password for '$username' (leave blank for none)"
 

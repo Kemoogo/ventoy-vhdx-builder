@@ -3,9 +3,11 @@
 # ==============================================================================
 # Script: create_ventoy_vhdx.sh (Industrial-Grade Robust & Force-Kill Safe)
 # Features:
+#   - True Dynamic VHDX Allocation & Post-build Compaction (Zero-Bloat)
+#   - Dynamic Username default based on current session ($USER)
 #   - Full Tab Autocompletion (Readline enabled via read -e)
-#   - Full Process Group & Signal Trap handling (INT, TERM, HUP, QUIT, EXIT)
-#   - Process Killer for child background tasks (wimapply, qemu-nbd, wget)
+#   - Process Group & Signal Trap handling (INT, TERM, HUP, QUIT, EXIT)
+#   - Active Child Process Watchdog (wimapply, qemu-nbd, wget)
 #   - Force-unmount & Lazy-unmount (umount -l / fuser -km) to kill busy locks
 #   - Incomplete artifact cleanup (deletes half-written VHDX on cancellation)
 #   - Dynamic free NBD discovery & force-disconnect on abort
@@ -32,6 +34,10 @@ ALLOCATED_NBD=""
 FINAL_VHDX_PATH=""
 ACTIVE_CHILD_PID=""
 OPERATION_COMPLETED=false
+
+# Default user resolution (Fallback to Admin if root/empty)
+DETECTED_USER="${SUDO_USER:-${USER:-Admin}}"
+[ "$DETECTED_USER" = "root" ] && DETECTED_USER="Admin"
 
 # ------------------------------------------------------------------------------
 # Robust Cleanup & Force Termination Routine
@@ -156,12 +162,11 @@ for cmd in "${REQUIRED_TOOLS[@]}"; do
     fi
 done
 
-# Step 1: Image source with Tab Completion enabled (read -e)
+# Step 1: Image source with Tab Completion
 echo -e "${BLUE}${BOLD}[1/5] Image Source (.wim / .esd / .iso)${NC}"
-echo -e "${YELLOW}(Tip: You can use [TAB] key for path auto-completion)${NC}"
+echo -e "${YELLOW}(Tip: Use [TAB] for path auto-completion)${NC}"
 while true; do
     read -e -rp "Enter path to Windows ISO, install.wim, or install.esd: " SRC_PATH
-    # Expand tilde (~) and clean quotes
     SRC_PATH="${SRC_PATH/#\~/$HOME}"
     SRC_PATH="$(echo "$SRC_PATH" | xargs)"
     if [ -f "$SRC_PATH" ]; then
@@ -207,7 +212,7 @@ while true; do
     echo -e "${RED}Invalid index. Must be between 1 and $TOTAL_IMAGES.${NC}"
 done
 
-# Step 2: Output Configuration with Tab Completion (read -e)
+# Step 2: Output Configuration
 echo -e "\n${BLUE}${BOLD}[2/5] VHDX Configuration${NC}"
 read -e -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
 OUT_DIR=${OUT_DIR:-"$(pwd)"}
@@ -242,10 +247,10 @@ fi
 read -rp "Enter VHDX max expandable size in GB [default: 100]: " VHDX_SIZE
 VHDX_SIZE=${VHDX_SIZE:-100}
 
-# Step 3: User Accounts
+# Step 3: User Accounts (Dynamic default to current user)
 echo -e "\n${BLUE}${BOLD}[3/5] User & System Configuration${NC}"
-read -rp "Enter Local Username [default: karim]: " USER_NAME
-USER_NAME=${USER_NAME:-"karim"}
+read -rp "Enter Local Username [default: $DETECTED_USER]: " USER_NAME
+USER_NAME=${USER_NAME:-"$DETECTED_USER"}
 
 read -rp "Enter Password for '$USER_NAME' (leave blank for none): " USER_PASS
 USER_PASS=${USER_PASS:-""}
@@ -259,7 +264,7 @@ XML_COMP=$(escape_xml "$COMPUTER_NAME")
 
 echo -e "\n${GREEN}Summary of settings:${NC}"
 echo " - Source Image : $ACTUAL_IMAGE_PATH (Index: $WIM_INDEX)"
-echo " - Target VHDX  : $FINAL_VHDX_PATH (${VHDX_SIZE}GB Expandable)"
+echo " - Target VHDX  : $FINAL_VHDX_PATH (${VHDX_SIZE}GB Dynamic)"
 echo " - User Account : $USER_NAME"
 echo " - Password     : $([ -z "$USER_PASS" ] && echo "(None)" || echo "********")"
 echo " - Tagging      : portable operating system 1"
@@ -271,9 +276,9 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Step 4: Create VHDX
-echo -e "\n${BLUE}[*] Step 1: Creating expandable VHDX (${VHDX_SIZE}G)...${NC}"
-qemu-img create -f vhdx "$FINAL_VHDX_PATH" "${VHDX_SIZE}G"
+# Step 4: Create VHDX with explicit dynamic subformat and optimized block size
+echo -e "\n${BLUE}[*] Step 1: Creating dynamic expandable VHDX (${VHDX_SIZE}G)...${NC}"
+qemu-img create -f vhdx -o subformat=dynamic,block_size=2M "$FINAL_VHDX_PATH" "${VHDX_SIZE}G"
 
 # Step 5: Connect NBD
 echo -e "${BLUE}[*] Step 2: Allocating free NBD device...${NC}"
@@ -407,10 +412,21 @@ if [ -n "$ISO_MOUNT_DIR" ]; then
     ISO_MOUNT_DIR=""
 fi
 
-sudo chown "$USER:$USER" "$FINAL_VHDX_PATH"
+# Step 12: Shrink & Compact VHDX to eliminate any sparse bloat
+echo -e "${BLUE}[*] Step 9: Compacting VHDX to reclaim unallocated space...${NC}"
+COMPACT_TMP="${FINAL_VHDX_PATH}.compacting"
+if qemu-img convert -f vhdx -O vhdx -o subformat=dynamic,block_size=2M "$FINAL_VHDX_PATH" "$COMPACT_TMP" 2>/dev/null; then
+    mv -f "$COMPACT_TMP" "$FINAL_VHDX_PATH"
+    echo -e "${GREEN}VHDX compacted successfully.${NC}"
+else
+    rm -f "$COMPACT_TMP" 2>/dev/null || true
+fi
 
-# Step 12: Ventoy Plugin
-echo -e "${BLUE}[*] Step 9: Preparing Ventoy vhdboot plugin...${NC}"
+REAL_SIZE=$(du -h "$FINAL_VHDX_PATH" | awk '{print $1}')
+sudo chown "${SUDO_USER:-$USER}:${SUDO_USER:-$USER}" "$FINAL_VHDX_PATH"
+
+# Step 13: Ventoy Plugin
+echo -e "${BLUE}[*] Step 10: Preparing Ventoy vhdboot plugin...${NC}"
 if [ ! -f "$OUT_DIR/ventoy_vhdboot.img" ]; then
     echo -e "${YELLOW}Downloading Ventoy vhdboot plugin...${NC}"
     TMP_ZIP="/tmp/ventoy_vhdboot_$$.zip"
@@ -430,12 +446,11 @@ OPERATION_COMPLETED=true
 echo -e "\n${GREEN}${BOLD}=========================================================="
 echo "                 PROCESS COMPLETED SUCCESSFULLY!          "
 echo "==========================================================${NC}"
-echo -e "VHDX Image    : ${BOLD}$FINAL_VHDX_PATH${NC}"
+echo -e "VHDX File     : ${BOLD}$FINAL_VHDX_PATH${NC}"
+echo -e "Actual Space  : ${BOLD}$REAL_SIZE${NC} (Virtual limit: ${VHDX_SIZE}GB)"
 echo -e "Ventoy Plugin : ${BOLD}$OUT_DIR/ventoy_vhdboot.img${NC}"
 echo ""
-echo -e "${YELLOW}Ventoy Instructions:${NC}"
-echo "1. On Ventoy USB, create folder 'ventoy' in root."
-echo "2. Copy 'ventoy_vhdboot.img' to '/ventoy/' folder."
-echo "3. Copy '$(basename "$FINAL_VHDX_PATH")' anywhere on Ventoy USB."
-echo "4. Boot from Ventoy and enjoy portable Windows!"
+echo -e "${YELLOW}Notice on Copying to USB:${NC}"
+echo "When copying to your USB drive, use sparse copy to prevent size expansion:"
+echo "  cp --sparse=always \"$FINAL_VHDX_PATH\" /path/to/ventoy/usb/"
 echo "=========================================================="
