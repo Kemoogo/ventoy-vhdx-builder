@@ -515,28 +515,46 @@ INNER_EOF
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/Windows/System32/Sysprep/unattend.xml"
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/autounattend.xml"
 
-# Step 7: Direct Offline Registry Patching (Critical for 0x7B / Inaccessible Boot Device prevention)
-echo -e "${BLUE}[*] Step 7: Injecting PortableOperatingSystem into offline SYSTEM registry...${NC}"
+# Step 7: Direct Offline Registry Patching (Fixes 0x7B / Inaccessible Boot Device)
+echo -e "${BLUE}[*] Step 7: Injecting PortableOperatingSystem & MountedDevices into offline SYSTEM registry...${NC}"
 SYS_HIVE="$MOUNT_DIR/Windows/System32/config/SYSTEM"
+PART2_UUID=$(blkid -s PARTUUID -o value "$PART_DEV" 2>/dev/null || true)
 if [ -f "$SYS_HIVE" ]; then
     python3 -c "
-import hivex, struct, sys
+import hivex, struct, sys, uuid
 
 try:
     h = hivex.Hivex('$SYS_HIVE', write=True)
     root = h.root()
+    
+    # 1. Map \DosDevices\C: to Partition 2 unique GUID in MountedDevices
+    part_uuid_str = '$PART2_UUID'
+    if part_uuid_str:
+        u = uuid.UUID(part_uuid_str)
+        dmio_val = b'DMIO:ID:' + u.bytes_le
+        md = h.node_get_child(root, 'MountedDevices')
+        if not md:
+            md = h.node_add_child(root, 'MountedDevices')
+        h.node_set_value(md, {'key': '\\\\DosDevices\\\\C:', 't': 3, 'value': dmio_val})
+        print('  [+] Pinned \\\\DosDevices\\\\C: in MountedDevices to GPT partition GUID.')
+
+    # 2. Configure ControlSet001 for Portable VHD boot
     cs = [c for c in h.node_children(root) if h.node_name(c).lower() == 'controlset001']
     if cs:
         ctrl = h.node_get_child(cs[0], 'Control')
         if ctrl:
-            val = {'key': 'PortableOperatingSystem', 't': 4, 'value': struct.pack('<I', 1)}
-            h.node_set_value(ctrl, val)
+            h.node_set_value(ctrl, {'key': 'PortableOperatingSystem', 't': 4, 'value': struct.pack('<I', 1)})
+            h.node_set_value(ctrl, {'key': 'BootDriverFlags', 't': 4, 'value': struct.pack('<I', 28)})
+            print('  [+] Control: PortableOperatingSystem=1, BootDriverFlags=28.')
+            
         services = h.node_get_child(cs[0], 'Services')
         if services:
+            # Ensure vhdmp and fsdepends remain demand-start (Start=3)
             for sname in ['vhdmp', 'fsdepends']:
                 snode = h.node_get_child(services, sname)
                 if snode:
-                    h.node_set_value(snode, {'key': 'Start', 't': 4, 'value': struct.pack('<I', 0)})
+                    h.node_set_value(snode, {'key': 'Start', 't': 4, 'value': struct.pack('<I', 3)})
+                    
     h.commit('$SYS_HIVE')
     print('  [+] Offline SYSTEM registry successfully patched for Portable VHD boot.')
 except Exception as e:

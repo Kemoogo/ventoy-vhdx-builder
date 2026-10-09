@@ -399,15 +399,28 @@ assign letter=$script:targetDrive
     [System.IO.File]::WriteAllText((Join-Path $sysprepDir "unattend.xml"), $unattendXmlContent, [System.Text.Encoding]::UTF8)
     [System.IO.File]::WriteAllText((Join-Path $vhdDriveRoot "autounattend.xml"), $unattendXmlContent, [System.Text.Encoding]::UTF8)
 
-    # 4. Offline Registry Patch
-    Write-Color "`n[*] Step 4: Injecting PortableOperatingSystem into offline SYSTEM registry..." Cyan
+    # 4. Offline Registry Patch (Fixes 0x7B / Inaccessible Boot Device)
+    Write-Color "`n[*] Step 4: Injecting PortableOperatingSystem & MountedDevices into offline registry..." Cyan
     $sysHivePath = Join-Path $vhdDriveRoot "Windows\System32\config\SYSTEM"
     if (Test-Path $sysHivePath) {
         & reg.exe load HKLM\VHD_OFFLINE_SYSTEM "$sysHivePath" | Out-Null
         if ($LASTEXITCODE -eq 0) {
             & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Control" /v PortableOperatingSystem /t REG_DWORD /d 1 /f | Out-Null
-            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Services\vhdmp" /v Start /t REG_DWORD /d 0 /f | Out-Null
-            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Services\fsdepends" /v Start /t REG_DWORD /d 0 /f | Out-Null
+            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Control" /v BootDriverFlags /t REG_DWORD /d 28 /f | Out-Null
+            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Services\vhdmp" /v Start /t REG_DWORD /d 3 /f | Out-Null
+            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Services\fsdepends" /v Start /t REG_DWORD /d 3 /f | Out-Null
+
+            # Pin \DosDevices\C: in MountedDevices to Partition 2 GUID
+            try {
+                $part2 = Get-Partition -DiskNumber $script:attachedDiskNumber -PartitionNumber 2 -ErrorAction SilentlyContinue
+                if ($part2 -and $part2.Guid) {
+                    $guidBytes = [System.Guid]::Parse($part2.Guid).ToByteArray()
+                    $dmioBytes = [System.Text.Encoding]::ASCII.GetBytes("DMIO:ID:") + $guidBytes
+                    $hexStr = ($dmioBytes | ForEach-Object { $_.ToString("X2") }) -join ""
+                    & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\MountedDevices" /v "\DosDevices\C:" /t REG_BINARY /d "$hexStr" /f | Out-Null
+                }
+            } catch {}
+
             [GC]::Collect()
             [GC]::WaitForPendingFinalizers()
             & reg.exe unload HKLM\VHD_OFFLINE_SYSTEM | Out-Null
