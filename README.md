@@ -149,11 +149,19 @@ Once the script completes, you will have your generated `.vhdx` file (e.g. `Win1
        └── ventoy_vhdboot.img   <-- Place plugin here!
    ```
 3. Copy your `.vhdx` file anywhere on the Ventoy USB drive.
-   > **Tip for Linux Users:** Use sparse copying to prevent physical bloat on your USB drive:
+   > **⚠️ CRITICAL Tip for Linux Users:**
+   > Always run `sync` in your terminal after copying and wait for it to finish:
    > ```bash
-   > cp --sparse=always Win11.vhdx /media/user/Ventoy/
+   > rsync -P --sparse Win11.vhdx /media/user/Ventoy/ && sync
    > ```
+   > *Why?* Linux caches large writes in RAM. If you unplug or test in a VM before the cache is flushed with `sync`, the file will be truncated at the end where the VHDX Block Allocation Table (BAT) resides, leading to `Windows Boot Manager Error 0xc0000102`.
 4. Reboot your computer, choose the Ventoy USB in your BIOS Boot Menu, select your `.vhdx` file, and enjoy!
+
+> **Testing in QEMU:**
+> Windows 11 requires UEFI. When testing your Ventoy USB drive in QEMU, always pass OVMF UEFI firmware:
+> ```bash
+> sudo qemu-system-x86_64 -enable-kvm -m 4G -smp 4 -cpu host -bios /usr/share/ovmf/OVMF.fd -drive file=/dev/sdX,format=raw,cache=none -vga virtio -usb -device usb-tablet
+> ```
 
 ---
 

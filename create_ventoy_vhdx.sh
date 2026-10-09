@@ -580,6 +580,40 @@ echo "                 PROCESS COMPLETED SUCCESSFULLY!          "
 echo "==========================================================${NC}"
 echo -e "VHDX File     : ${BOLD}$FINAL_VHDX_PATH${NC}"
 echo -e "Actual Space  : ${BOLD}$REAL_SIZE${NC} (Virtual limit: ${VHDX_SIZE}GB)"
+
+# Optional Ventoy USB copy helper
+VENTOY_MOUNT=$(lsblk -rn -o MOUNTPOINT,LABEL 2>/dev/null | awk 'tolower($2)=="ventoy" {print $1}' | head -n 1)
+if [ -z "$VENTOY_MOUNT" ] || [ ! -d "$VENTOY_MOUNT" ]; then
+    VENTOY_MOUNT=$(find /media /run/media -maxdepth 2 -type d -iname "*ventoy*" 2>/dev/null | head -n 1)
+fi
+
+if [ -n "$VENTOY_MOUNT" ] && [ -d "$VENTOY_MOUNT" ]; then
+    echo -e "\n${CYAN}${BOLD}[Optional] Direct USB Copy:${NC}"
+    echo -e "Detected Ventoy USB drive mounted at: ${BOLD}$VENTOY_MOUNT${NC}"
+    read -p "Would you like to copy '$FINAL_VHDX_NAME' to this drive now? [y/N]: " COPY_USB_CHOICE
+    if [[ "$COPY_USB_CHOICE" =~ ^[Yy]$ ]]; then
+        DEFAULT_DEST_DIR="$VENTOY_MOUNT"
+        if [ -d "$VENTOY_MOUNT/OS/VDisk" ]; then
+            DEFAULT_DEST_DIR="$VENTOY_MOUNT/OS/VDisk"
+        elif [ -d "$VENTOY_MOUNT/VDisk" ]; then
+            DEFAULT_DEST_DIR="$VENTOY_MOUNT/VDisk"
+        fi
+        read -p "Enter destination directory on USB [default: $DEFAULT_DEST_DIR]: " INPUT_DEST_DIR
+        TARGET_DIR="${INPUT_DEST_DIR:-$DEFAULT_DEST_DIR}"
+        mkdir -p "$TARGET_DIR"
+        TARGET_FILE="$TARGET_DIR/$FINAL_VHDX_NAME"
+        echo -e "${BLUE}[*] Copying with progress (sparse transfer)...${NC}"
+        if command -v rsync &>/dev/null; then
+            rsync -P --sparse "$FINAL_VHDX_PATH" "$TARGET_FILE"
+        else
+            cp --sparse=always "$FINAL_VHDX_PATH" "$TARGET_FILE"
+        fi
+        echo -e "${YELLOW}[*] Flushing disk write cache to USB flash memory (sync)...${NC}"
+        sync
+        echo -e "${GREEN}${BOLD}[✔] File safely copied and synced to USB:${NC} $TARGET_FILE"
+    fi
+fi
+
 echo ""
 echo -e "${CYAN}${BOLD}Ventoy VHD Boot Setup & Official Resources:${NC}"
 echo -e "For Ventoy to boot Windows VHD/VHDX, make sure the official plugin is on your USB:"
@@ -591,6 +625,10 @@ echo "1. Download 'ventoy_vhdboot.zip' from the link above and extract 'ventoy_v
 echo "2. On your Ventoy USB, create a folder named 'ventoy' in root."
 echo "3. Copy 'ventoy_vhdboot.img' to '/ventoy/ventoy_vhdboot.img'."
 echo "4. Copy '$(basename "$FINAL_VHDX_PATH")' to anywhere on your Ventoy USB."
-echo "   (Tip: In Linux use sparse copy: cp --sparse=always \"$FINAL_VHDX_PATH\" /path/to/usb/)"
-echo "5. Boot from Ventoy and enjoy portable Windows!"
+echo ""
+echo -e "${YELLOW}${BOLD}⚠️  CRITICAL NOTICE FOR LINUX USB USERS:${NC}"
+echo -e "If copying manually in Linux, ${RED}${BOLD}ALWAYS run 'sync'${NC} in terminal after copying"
+echo -e "and wait for it to complete before testing in QEMU or unplugging!"
+echo -e "Linux caches large file writes in RAM; failure to sync truncates the VHDX BAT table"
+echo -e "and causes ${RED}Windows Boot Manager Error 0xc0000102 (Corrupted BCD/VHDX)${NC}."
 echo "=========================================================="

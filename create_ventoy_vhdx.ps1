@@ -428,6 +428,31 @@ if ($script:operationCompleted) {
     Write-Color "                 PROCESS COMPLETED SUCCESSFULLY!          " Green
     Write-Color "==========================================================" Green
     Write-Host "Generated VHDX : $script:finalVhdxPath"
+    
+    # Optional Ventoy USB copy helper
+    $ventoyVolume = Get-Volume | Where-Object { $_.FileSystemLabel -eq "Ventoy" -or $_.DriveLetter -ne $null } | Where-Object { $_.FileSystemLabel -like "*Ventoy*" } | Select-Object -First 1
+    if ($ventoyVolume -and $ventoyVolume.DriveLetter) {
+        $usbDrive = "$($ventoyVolume.DriveLetter):\"
+        Write-Color "`n[Optional] Direct USB Copy:" Cyan
+        Write-Host "Detected Ventoy USB drive mounted at: $usbDrive"
+        $copyChoice = Read-Host "Would you like to copy '$script:vhdxName' to this drive now? [y/N]"
+        if ($copyChoice -match '^[Yy]$') {
+            $destDir = $usbDrive
+            if (Test-Path (Join-Path $usbDrive "OS\VDisk")) {
+                $destDir = Join-Path $usbDrive "OS\VDisk"
+            } elseif (Test-Path (Join-Path $usbDrive "VDisk")) {
+                $destDir = Join-Path $usbDrive "VDisk"
+            }
+            $inputDest = Read-Host "Enter destination directory on USB [default: $destDir]"
+            if (-not [string]::IsNullOrWhiteSpace($inputDest)) { $destDir = $inputDest }
+            if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+            $targetFile = Join-Path $destDir $script:vhdxName
+            Write-Color "[*] Copying VHDX to USB drive..." Cyan
+            Copy-Item -Path $script:finalVhdxPath -Destination $targetFile -Force
+            Write-Color "[✔] File safely copied to USB: $targetFile" Green
+        }
+    }
+
     Write-Host ""
     Write-Color "Ventoy VHD Boot Setup & Official Resources:" Cyan
     Write-Host "For Ventoy to boot Windows VHD/VHDX, download the official plugin:"
@@ -439,7 +464,8 @@ if ($script:operationCompleted) {
     Write-Host "2. On your Ventoy USB drive, create a folder named 'ventoy' in root."
     Write-Host "3. Copy 'ventoy_vhdboot.img' into that '\ventoy\' folder."
     Write-Host "4. Copy '$script:vhdxName' anywhere on the Ventoy USB drive."
-    Write-Host "5. Boot from Ventoy and choose your Windows VHDX!"
+    Write-Host "5. Always use 'Safely Remove Hardware' / Eject before unplugging the USB drive!"
+    Write-Host "6. Boot from Ventoy and choose your Windows VHDX!"
     Write-Color "==========================================================" Green
 } else {
     Write-Color "`n[!] Build was aborted or encountered errors. System was restored cleanly." Red
