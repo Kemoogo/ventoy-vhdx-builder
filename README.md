@@ -1,84 +1,101 @@
-# Ventoy VHDX Builder for Windows (Linux Native)
+# Ventoy Windows VHDX Builder (Cross-Platform: Linux & Windows)
 
-A powerful, interactive, and bulletproof Bash script to create a bootable Windows VHDX directly inside Linux for use with **Ventoy** (Native VHD Boot).
+An automated, interactive, and bulletproof utility to create bootable Windows VHDX files for **Ventoy (Native VHD Boot)** with a fully automated OOBE bypass.
 
-It automates image applying (`install.wim` / `install.esd` / directly from `.iso`), partition creation, UEFI boot files configuration, OOBE bypass with an unattended answer file (`portable operating system 1`), and automatic setup of the required Ventoy VHD plugin.
+Works seamlessly on both **Linux** (using Bash, QEMU, and wimlib) and **Windows** (using PowerShell, Diskpart, and DISM).
 
 ---
 
-## Features
+## 🚀 Key Features
 
-- **100% Linux Native:** No Windows VM or WinPE needed.
-- **Direct ISO Support:** Accepts `.iso`, `.wim`, or `.esd` files directly.
-- **Interactive & Smart:** Scans and lists available Windows editions (Index), and suggests sensible defaults.
-- **Bypasses Windows OOBE:** Automatically skips Microsoft account creation, telemetry, questions, and sets up a local administrator account with AutoLogon.
-- **Branded & Tagged:** Injects `"portable operating system 1"` metadata into Windows setup.
-- **Kernel-Safe & Bulletproof:**
-  - Dynamically finds available `/dev/nbd*` devices.
-  - Mitigates kernel partition table race conditions using `udevadm` and `partx`.
+- **Cross-Platform Support:** Native scripts for both **Linux** (`.sh`) and **Windows** (`.ps1` / `.bat`).
+- **Direct ISO Support:** Accepts `.iso`, `.wim`, or `.esd` files directly. If an ISO is provided, it automatically mounts and finds the image inside.
+- **Interactive & Smart:** Scans and displays available Windows editions (Index), and suggests sensible defaults.
+- **Bypasses Windows OOBE Completely:**
+  - Injects `unattend.xml` into Panther and Sysprep.
+  - Automatically creates a local administrator user.
+  - Enables **AutoLogon** straight to desktop.
+  - Skips Microsoft account requirement, WiFi setup, privacy toggles, and EULA screens.
+- **Branded & Tagged:** Injects `"portable operating system 1"` metadata into Windows setup (Organization, Owner, and Account Description).
+- **Safe & Resilient (Bulletproof):**
+  - **Linux:** Dynamic free NBD device allocation (`/dev/nbd*`), `udevadm`/`partx` kernel partition sync, and full signal trap cleanup (`Ctrl+C`).
+  - **Windows:** Auto-elevation prompt, dynamic free drive letter allocation, native `diskpart` & `bcdboot` integration.
   - XML escaping for special characters in usernames/passwords.
-  - Safe error trapping and cleanup on exit/interruption.
   - Pre-flight free disk space checks.
-- **Ventoy Ready:** Auto-downloads and prepares `ventoy_vhdboot.img`.
+- **Ventoy Ready:** Automatically downloads and prepares `ventoy_vhdboot.img` for your USB drive.
 
 ---
 
-## Prerequisites
+## 🐧 Usage on Linux
 
-Install required Linux utilities:
+### 1. Prerequisites
+Install the required packages:
 
-### Ubuntu / Debian:
+**Ubuntu / Debian:**
 ```bash
 sudo apt update
 sudo apt install qemu-utils wimtools parted ntfs-3g udev wget unzip
 ```
 
-### Arch Linux:
+**Arch Linux:**
 ```bash
 sudo pacman -S qemu-img wimlib parted ntfs-3g udev wget unzip
 ```
 
-### Fedora:
+**Fedora:**
 ```bash
 sudo dnf install qemu-img wimtools parted ntfs-3g udev wget unzip
 ```
 
----
-
-## How to Use
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/<your-username>/ventoy-vhdx-builder.git
-   cd ventoy-vhdx-builder
-   ```
-
-2. Make the script executable and run:
-   ```bash
-   chmod +x create_ventoy_vhdx.sh
-   ./create_ventoy_vhdx.sh
-   ```
-
-3. Follow the interactive prompts:
-   - Provide the path to your Windows ISO or `install.wim`.
-   - Choose the Windows edition index.
-   - Specify VHDX filename, expandable size, username, and password.
+### 2. Run
+```bash
+chmod +x create_ventoy_vhdx.sh
+./create_ventoy_vhdx.sh
+```
 
 ---
 
-## Ventoy Setup
+## 🪟 Usage on Windows
 
-Once the script completes, you will have two files:
-1. `YourImage.vhdx`
+### Option A: One-Click (Recommended)
+Right-click on **`run_windows.bat`** and select **Run as administrator** (or double-click it; it will automatically request elevation).
+
+### Option B: PowerShell
+Open **PowerShell as Administrator** and run:
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\create_ventoy_vhdx.ps1
+```
+
+---
+
+## 📁 Ventoy USB Setup
+
+After running the script, you will have two files in your output directory:
+1. `YourImage.vhdx` (e.g., `Win11.vhdx` or `test_oobe.vhdx`)
 2. `ventoy_vhdboot.img`
 
-### On your Ventoy USB drive:
-1. Create a directory named `ventoy` in the root of the Ventoy partition if it doesn't already exist.
-2. Copy `ventoy_vhdboot.img` into `/ventoy/ventoy_vhdboot.img`.
-3. Copy your `.vhdx` file anywhere on the Ventoy USB drive.
-4. Reboot, choose the `.vhdx` file in Ventoy, and boot into Windows!
+### Deployment Steps:
+1. Open your Ventoy USB drive partition (the main storage partition).
+2. Create a folder named **`ventoy`** at the root of the USB drive (if it does not already exist).
+3. Copy **`ventoy_vhdboot.img`** into the **`\ventoy\`** folder:
+   ```text
+   X:\ventoy\ventoy_vhdboot.img
+   ```
+4. Copy your **`.vhdx`** file anywhere on the Ventoy USB drive.
+5. Reboot your machine, boot from Ventoy, and select your `.vhdx` file!
 
 ---
 
-## License
-MIT License.
+## ⚙️ Parameters & Customization
+
+The script interactively asks for:
+- **Image Source:** Path to `.iso`, `.wim`, or `.esd`.
+- **Edition Index:** Choice of edition (e.g., Pro, Home, Enterprise).
+- **VHDX Name & Max Size:** e.g., `Win11.vhdx`, 100GB expandable (grows on demand).
+- **User Account:** Desired local username, optional password, and PC name.
+
+---
+
+## 📜 License
+MIT License. Free to use, modify, and distribute.
