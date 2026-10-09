@@ -6,6 +6,7 @@
     injects unattended answer file (portable operating system 1) to bypass OOBE,
     patches offline registry for PortableOperatingSystem and boot storage drivers,
     and generates UEFI boot files via bcdboot.
+    Includes interactive input editing before build execution.
 #>
 
 #Requires -RunAsAdministrator
@@ -39,20 +40,18 @@ if (-not $isAdmin) {
 
 Show-Header
 
-function Read-HostWithTab([string]$prompt) {
+function Read-HostWithTab([string]$prompt, [string]$defaultVal = "") {
     Write-Host $prompt -NoNewline -ForegroundColor Cyan
-    Write-Host " (Tab auto-complete enabled): " -NoNewline -ForegroundColor Yellow
-    
-    if (Get-Module -Name PSReadLine) {
-        return (Read-Host)
-    } else {
-        try {
-            Import-Module PSReadLine -ErrorAction SilentlyContinue
-            return (Read-Host)
-        } catch {
-            return (Read-Host)
-        }
+    if ($defaultVal) {
+        Write-Host " [default: $defaultVal]" -NoNewline -ForegroundColor Yellow
     }
+    Write-Host ": " -NoNewline
+    
+    $val = Read-Host
+    if ([string]::IsNullOrWhiteSpace($val)) {
+        return $defaultVal
+    }
+    return $val.Trim('"', "'", " ")
 }
 
 # State variables for robust cleanup & force-termination
@@ -123,18 +122,27 @@ function Get-FreeDriveLetter {
     return "V"
 }
 
-try {
-    # 2. Image Selection with Tab-Complete
-    Write-Color "[1/5] Image Source (.iso / .wim / .esd)" Green
-    $imagePath = ""
+# Configuration variables
+$imagePath = ""
+$selectedWimIndex = 1
+$outDir = (Get-Location).Path
+$vhdxName = "Win11.vhdx"
+$vhdxSizeGb = 100
+$detectedUser = if ($env:USERNAME) { $env:USERNAME } else { "Admin" }
+$username = $detectedUser
+$userPass = ""
+$computerName = "PORTABLE-PC"
 
+function Ask-SourceImage {
     while ($true) {
-        $inputPath = Read-HostWithTab "Enter path to Windows ISO, install.wim, or install.esd"
-        $inputPath = $inputPath.Trim('"', "'", " ")
+        $inputPath = Read-HostWithTab "Enter path to Windows ISO, install.wim, or install.esd" $script:imagePath
         
         if (Test-Path -Path $inputPath -PathType Leaf) {
             $ext = [System.IO.Path]::GetExtension($inputPath).ToLower()
             if ($ext -eq ".iso") {
+                if ($script:mountedIsoPath) {
+                    Dismount-DiskImage -ImagePath $script:mountedIsoPath -ErrorAction SilentlyContinue | Out-Null
+                }
                 Write-Color "[*] Mounting ISO image..." Cyan
                 $script:mountedIsoPath = $inputPath
                 $mountResult = Mount-DiskImage -ImagePath $inputPath -PassThru
@@ -145,10 +153,10 @@ try {
                 $esdCandidate = Join-Path $isoDrive "sources\install.esd"
                 
                 if (Test-Path $wimCandidate) {
-                    $imagePath = $wimCandidate
+                    $script:imagePath = $wimCandidate
                     break
                 } elseif (Test-Path $esdCandidate) {
-                    $imagePath = $esdCandidate
+                    $script:imagePath = $esdCandidate
                     break
                 } else {
                     Dismount-DiskImage -ImagePath $inputPath | Out-Null
@@ -156,7 +164,7 @@ try {
                     Write-Color "[ERROR] Neither install.wim nor install.esd found inside the ISO." Red
                 }
             } elseif ($ext -in @(".wim", ".esd")) {
-                $imagePath = $inputPath
+                $script:imagePath = $inputPath
                 break
             } else {
                 Write-Color "[ERROR] Unsupported extension. Please choose .iso, .wim, or .esd." Red
@@ -165,51 +173,102 @@ try {
             Write-Color "[ERROR] File not found: '$inputPath'. Try again." Red
         }
     }
+}
 
+function Ask-WimIndex {
     Write-Color "`n[*] Scanning image editions..." Cyan
-    $wimInfo = & dism.exe /Get-WimInfo /WimFile:"$imagePath"
+    $wimInfo = & dism.exe /Get-WimInfo /WimFile:"$script:imagePath"
     $wimInfo | Out-String | Write-Host
 
-    $selectedWimIndex = 1
     while ($true) {
-        $idxInput = Read-Host "`nEnter Image Index to apply [default: 1]"
-        if ([string]::IsNullOrWhiteSpace($idxInput)) {
-            $selectedWimIndex = 1
-            break
-        }
+        $idxInput = Read-HostWithTab "Enter Image Index to apply" "$script:selectedWimIndex"
         if ($idxInput -match '^\d+$') {
-            $selectedWimIndex = [int]$idxInput
+            $script:selectedWimIndex = [int]$idxInput
             break
         }
         Write-Color "Please enter a valid numeric index." Red
     }
+}
 
-    # 3. VHDX Options with Tab-Complete
-    Write-Color "`n[2/5] VHDX Configuration" Green
-    $defaultOutDir = (Get-Location).Path
-    $outDirInput = Read-HostWithTab "Enter output directory [default: $defaultOutDir]"
-    $outDir = if ([string]::IsNullOrWhiteSpace($outDirInput)) { $defaultOutDir } else { $outDirInput.Trim('"', "'", " ").TrimEnd('/\') }
-    if (-not (Test-Path $outDir)) {
-        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+function Ask-OutputConfig {
+    $script:outDir = (Read-HostWithTab "Enter output directory" "$script:outDir").TrimEnd('/\')
+    if (-not (Test-Path $script:outDir)) {
+        New-Item -ItemType Directory -Path $script:outDir -Force | Out-Null
     }
 
-    $outDriveRoot = [System.IO.Path]::GetPathRoot($outDir)
+    $script:vhdxName = Read-HostWithTab "Enter VHDX filename" "$script:vhdxName"
+    if (-not $script:vhdxName.ToLower().EndsWith(".vhdx")) { $script:vhdxName += ".vhdx" }
+
+    $sizeInput = Read-HostWithTab "Enter VHDX max expandable size in GB" "$script:vhdxSizeGb"
+    if ($sizeInput -match '^\d+$') { $script:vhdxSizeGb = [int]$sizeInput }
+}
+
+function Ask-UserConfig {
+    $script:username = Read-HostWithTab "Enter Local Username" "$script:username"
+    Write-Host "Enter Password for '$script:username' (leave blank for none): " -NoNewline -ForegroundColor Cyan
+    $script:userPass = Read-Host
+    $script:computerName = Read-HostWithTab "Enter Computer Name" "$script:computerName"
+}
+
+# Initial Prompts
+Write-Color "`n[1/5] Image Source" Green
+Ask-SourceImage
+Ask-WimIndex
+
+Write-Color "`n[2/5] VHDX Configuration" Green
+Ask-OutputConfig
+
+Write-Color "`n[3/5] User & System Configuration" Green
+Ask-UserConfig
+
+# Review & Edit Loop
+while ($true) {
+    $script:finalVhdxPath = Join-Path $script:outDir $script:vhdxName
+    Write-Color "`n==================== Summary of Settings ====================" Green
+    Write-Host " [1] Source Image : $script:imagePath"
+    Write-Host " [2] Image Index  : $script:selectedWimIndex"
+    Write-Host " [3] Output Dir   : $script:outDir"
+    Write-Host " [4] VHDX Name    : $script:vhdxName -> ($script:finalVhdxPath)"
+    Write-Host " [5] Max Size     : $script:vhdxSizeGb GB Dynamic (Expandable)"
+    Write-Host " [6] User & PC    : User: $script:username | Pass: $(if ([string]::IsNullOrEmpty($script:userPass)) { '(None)' } else { '********' }) | PC: $script:computerName"
+    Write-Host "     Metadata Tag : portable operating system 1"
+    Write-Color "=============================================================" Green
+    Write-Host "Options:"
+    Write-Host "  - Press [Enter] or type 'y' to START building."
+    Write-Host "  - Type a number (1-6) to EDIT that specific field."
+    Write-Host "  - Type 'q' to cancel."
+    
+    $choice = (Read-Host "Choose option [Y/1-6/q]").Trim()
+    if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^[Yy]$') {
+        break
+    } elseif ($choice -eq "1") {
+        Ask-SourceImage
+        Ask-WimIndex
+    } elseif ($choice -eq "2") {
+        Ask-WimIndex
+    } elseif ($choice -in @("3", "4", "5")) {
+        Ask-OutputConfig
+    } elseif ($choice -eq "6") {
+        Ask-UserConfig
+    } elseif ($choice -match '^[Qq]$') {
+        Write-Color "Operation cancelled by user." Yellow
+        if ($script:mountedIsoPath) { Dismount-DiskImage -ImagePath $script:mountedIsoPath -ErrorAction SilentlyContinue | Out-Null }
+        exit 0
+    }
+}
+
+try {
+    # Free space check
+    $outDriveRoot = [System.IO.Path]::GetPathRoot($script:outDir)
     $driveInfo = Get-PSDrive ($outDriveRoot.TrimEnd(':\')) -ErrorAction SilentlyContinue
     if ($driveInfo) {
         $freeGb = [math]::Round($driveInfo.Free / 1GB, 2)
-        if ($freeGb -lt 25) {
-            Write-Color "[WARNING] Target drive has only $freeGb GB free space (25+ GB recommended)." Yellow
+        if ($freeGb -lt 20) {
+            Write-Color "[WARNING] Target drive has only $freeGb GB free space." Yellow
             $continueSpace = Read-Host "Proceed anyway? [y/N]"
-            if ($continueSpace -notmatch '^[Yy]$') {
-                exit 1
-            }
+            if ($continueSpace -notmatch '^[Yy]$') { exit 1 }
         }
     }
-
-    $vhdxNameInput = Read-Host "Enter VHDX filename [default: Win11.vhdx]"
-    $vhdxName = if ([string]::IsNullOrWhiteSpace($vhdxNameInput)) { "Win11.vhdx" } else { $vhdxNameInput.Trim() }
-    if (-not $vhdxName.ToLower().EndsWith(".vhdx")) { $vhdxName += ".vhdx" }
-    $script:finalVhdxPath = Join-Path $outDir $vhdxName
 
     if (Test-Path $script:finalVhdxPath) {
         Write-Color "[WARNING] '$script:finalVhdxPath' already exists." Yellow
@@ -221,40 +280,12 @@ try {
         Remove-Item $script:finalVhdxPath -Force
     }
 
-    $vhdxSizeInput = Read-Host "Enter VHDX max expandable size in GB [default: 100]"
-    $vhdxSizeGb = if ([string]::IsNullOrWhiteSpace($vhdxSizeInput)) { 100 } else { [int]$vhdxSizeInput }
-    $vhdxSizeMb = $vhdxSizeGb * 1024
+    $vhdxSizeMb = $script:vhdxSizeGb * 1024
+    $xmlUser = Escape-Xml $script:username
+    $xmlPass = Escape-Xml $script:userPass
+    $xmlComp = Escape-Xml $script:computerName
 
-    # 4. User and OOBE Settings
-    Write-Color "`n[3/5] User & System Configuration" Green
-    $detectedUser = if ($env:USERNAME) { $env:USERNAME } else { "Admin" }
-    $usernameInput = Read-Host "Enter Local Username [default: $detectedUser]"
-    $username = if ([string]::IsNullOrWhiteSpace($usernameInput)) { $detectedUser } else { $usernameInput.Trim() }
-
-    $userPass = Read-Host "Enter Password for '$username' (leave blank for none)"
-
-    $computerNameInput = Read-Host "Enter Computer Name [default: PORTABLE-PC]"
-    $computerName = if ([string]::IsNullOrWhiteSpace($computerNameInput)) { "PORTABLE-PC" } else { $computerNameInput.Trim() }
-
-    $xmlUser = Escape-Xml $username
-    $xmlPass = Escape-Xml $userPass
-    $xmlComp = Escape-Xml $computerName
-
-    Write-Color "`nSettings Summary:" Cyan
-    Write-Host " - Image Path    : $imagePath (Index: $selectedWimIndex)"
-    Write-Host " - Target VHDX   : $script:finalVhdxPath ($vhdxSizeGb GB Dynamic)"
-    Write-Host " - Username      : $username"
-    Write-Host " - Password      : $(if ([string]::IsNullOrEmpty($userPass)) { '(None)' } else { '********' })"
-    Write-Host " - Metadata Tag  : portable operating system 1"
-    Write-Host ""
-
-    $confirm = Read-Host "Start build? [Y/n]"
-    if (-not [string]::IsNullOrWhiteSpace($confirm) -and $confirm -notmatch '^[Yy]$') {
-        Write-Color "Cancelled by user." Yellow
-        exit 0
-    }
-
-    # 5. Diskpart create
+    # 1. Diskpart create
     Write-Color "`n[*] Step 1: Creating and mounting VHDX via diskpart..." Cyan
     $script:targetDrive = Get-FreeDriveLetter
     $diskpartScript = @"
@@ -276,11 +307,11 @@ assign letter=$script:targetDrive
     Start-Sleep -Seconds 2
     $vhdDriveRoot = "$($script:targetDrive):\"
 
-    # 6. Apply DISM with process tracking for cancellation
+    # 2. Apply DISM
     Write-Color "`n[*] Step 2: Applying Windows image to $vhdDriveRoot via DISM..." Cyan
     $pinfo = New-Object System.Diagnostics.ProcessStartInfo
     $pinfo.FileName = "dism.exe"
-    $pinfo.Arguments = "/Apply-Image /ImageFile:`"$imagePath`" /Index:$selectedWimIndex /ApplyDir:`"$vhdDriveRoot`""
+    $pinfo.Arguments = "/Apply-Image /ImageFile:`"$script:imagePath`" /Index:$script:selectedWimIndex /ApplyDir:`"$vhdDriveRoot`""
     $pinfo.UseShellExecute = $false
     $script:dismProcess = [System.Diagnostics.Process]::Start($pinfo)
     $script:dismProcess.WaitForExit()
@@ -290,7 +321,7 @@ assign letter=$script:targetDrive
     }
     $script:dismProcess = $null
 
-    # 7. Inject unattended XML
+    # 3. Inject unattended XML
     Write-Color "`n[*] Step 3: Injecting unattended answer file (portable operating system 1)..." Cyan
     $pantherDir = Join-Path $vhdDriveRoot "Windows\Panther"
     $sysprepDir = Join-Path $vhdDriveRoot "Windows\System32\Sysprep"
@@ -368,7 +399,7 @@ assign letter=$script:targetDrive
     [System.IO.File]::WriteAllText((Join-Path $sysprepDir "unattend.xml"), $unattendXmlContent, [System.Text.Encoding]::UTF8)
     [System.IO.File]::WriteAllText((Join-Path $vhdDriveRoot "autounattend.xml"), $unattendXmlContent, [System.Text.Encoding]::UTF8)
 
-    # 8. Direct Offline Registry Modification (PortableOperatingSystem = 1 & Boot drivers)
+    # 4. Offline Registry Patch
     Write-Color "`n[*] Step 4: Injecting PortableOperatingSystem into offline SYSTEM registry..." Cyan
     $sysHivePath = Join-Path $vhdDriveRoot "Windows\System32\config\SYSTEM"
     if (Test-Path $sysHivePath) {
@@ -407,7 +438,7 @@ if ($script:operationCompleted) {
     Write-Host "1. Download 'ventoy_vhdboot.zip' from the link above and extract 'ventoy_vhdboot.img'."
     Write-Host "2. On your Ventoy USB drive, create a folder named 'ventoy' in root."
     Write-Host "3. Copy 'ventoy_vhdboot.img' into that '\ventoy\' folder."
-    Write-Host "4. Copy '$vhdxName' anywhere on the Ventoy USB drive."
+    Write-Host "4. Copy '$script:vhdxName' anywhere on the Ventoy USB drive."
     Write-Host "5. Boot from Ventoy and choose your Windows VHDX!"
     Write-Color "==========================================================" Green
 } else {

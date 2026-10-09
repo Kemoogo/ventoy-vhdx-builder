@@ -3,6 +3,7 @@
 # ==============================================================================
 # Script: create_ventoy_vhdx.sh (Industrial-Grade Robust & Force-Kill Safe)
 # Features:
+#   - Interactive Input Editor & Review Loop (Edit any field before building)
 #   - Windows-Compliant GPT Layout (16MB MSR Partition + NTFS OS Partition)
 #   - NTFS Boot Sector Geometry Alignment (-p start -H 255 -S 63)
 #   - Automatic Offline Registry Injection (PortableOperatingSystem = 1)
@@ -167,64 +168,190 @@ for cmd in "${REQUIRED_TOOLS[@]}"; do
     fi
 done
 
-# Step 1: Image source with Tab Completion
-echo -e "${BLUE}${BOLD}[1/5] Image Source (.wim / .esd / .iso)${NC}"
-echo -e "${YELLOW}(Tip: Use [TAB] for path auto-completion)${NC}"
-while true; do
-    read -e -rp "Enter path to Windows ISO, install.wim, or install.esd: " SRC_PATH
-    SRC_PATH="${SRC_PATH/#\~/$HOME}"
-    SRC_PATH="$(echo "$SRC_PATH" | xargs)"
-    if [ -f "$SRC_PATH" ]; then
-        break
-    else
-        echo -e "${RED}File does not exist: '$SRC_PATH'. Try again.${NC}"
+# Initialize configuration variables
+SRC_PATH=""
+ACTUAL_IMAGE_PATH=""
+WIM_INDEX="1"
+OUT_DIR="$(pwd)"
+VHDX_NAME="Win11.vhdx"
+VHDX_SIZE="100"
+USER_NAME="$DETECTED_USER"
+USER_PASS=""
+COMPUTER_NAME="PORTABLE-PC"
+
+# Helper: Select Image File
+ask_source_image() {
+    echo -e "\n${BLUE}${BOLD}[Field 1] Windows Image Source (.wim / .esd / .iso)${NC}"
+    echo -e "${YELLOW}(Tip: Use [TAB] for path auto-completion)${NC}"
+    while true; do
+        read -e -rp "Enter path to Windows ISO, install.wim, or install.esd [current: ${SRC_PATH:-none}]: " input_val
+        input_val="${input_val:-$SRC_PATH}"
+        input_val="${input_val/#\~/$HOME}"
+        input_val="$(echo "$input_val" | xargs)"
+        if [ -f "$input_val" ]; then
+            SRC_PATH="$input_val"
+            break
+        else
+            echo -e "${RED}File does not exist: '$input_val'. Try again.${NC}"
+        fi
+    done
+
+    # If ISO, mount to find install.wim/esd
+    if [ -n "$ISO_MOUNT_DIR" ] && mountpoint -q "$ISO_MOUNT_DIR" 2>/dev/null; then
+        sudo umount -l "$ISO_MOUNT_DIR" 2>/dev/null || true
+        sudo rmdir "$ISO_MOUNT_DIR" 2>/dev/null || true
+        ISO_MOUNT_DIR=""
     fi
+
+    ACTUAL_IMAGE_PATH="$SRC_PATH"
+    if [[ "$SRC_PATH" =~ \.[iI][sS][oO]$ ]]; then
+        echo -e "${CYAN}[*] ISO detected. Mounting temporarily to locate image...${NC}"
+        ISO_MOUNT_DIR="/mnt/iso_tmp_$$"
+        sudo mkdir -p "$ISO_MOUNT_DIR"
+        sudo mount -o loop,ro "$SRC_PATH" "$ISO_MOUNT_DIR"
+        
+        if [ -f "$ISO_MOUNT_DIR/sources/install.wim" ]; then
+            ACTUAL_IMAGE_PATH="$ISO_MOUNT_DIR/sources/install.wim"
+        elif [ -f "$ISO_MOUNT_DIR/sources/install.esd" ]; then
+            ACTUAL_IMAGE_PATH="$ISO_MOUNT_DIR/sources/install.esd"
+        else
+            echo -e "${RED}[ERROR] Neither install.wim nor install.esd found in the ISO.${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}Found valid image inside ISO: $ACTUAL_IMAGE_PATH${NC}"
+    fi
+}
+
+# Helper: Select Image Edition Index
+ask_image_index() {
+    echo -e "\n${BLUE}${BOLD}[Field 2] Available Editions in Image:${NC}"
+    wiminfo "$ACTUAL_IMAGE_PATH" | grep -E "Index:|Name:|Architecture:" || true
+    echo ""
+
+    local total_images
+    total_images=$(wiminfo "$ACTUAL_IMAGE_PATH" | grep "Image Count:" | awk '{print $3}')
+    total_images=${total_images:-1}
+
+    while true; do
+        read -rp "Enter Image Index (1 to $total_images) [default: $WIM_INDEX]: " input_idx
+        input_idx=${input_idx:-$WIM_INDEX}
+        if [[ "$input_idx" =~ ^[0-9]+$ ]] && [ "$input_idx" -ge 1 ] && [ "$input_idx" -le "$total_images" ]; then
+            WIM_INDEX="$input_idx"
+            break
+        fi
+        echo -e "${RED}Invalid index. Must be between 1 and $total_images.${NC}"
+    done
+}
+
+# Helper: Output directory
+ask_output_dir() {
+    echo -e "\n${BLUE}${BOLD}[Field 3] Output Directory${NC}"
+    read -e -rp "Enter output directory [default: $OUT_DIR]: " input_dir
+    OUT_DIR=${input_dir:-$OUT_DIR}
+    OUT_DIR="${OUT_DIR/#\~/$HOME}"
+    OUT_DIR="${OUT_DIR%/}"
+    mkdir -p "$OUT_DIR"
+}
+
+# Helper: VHDX filename
+ask_vhdx_name() {
+    echo -e "\n${BLUE}${BOLD}[Field 4] Output VHDX Filename${NC}"
+    read -rp "Enter output VHDX filename [default: $VHDX_NAME]: " input_name
+    VHDX_NAME=${input_name:-$VHDX_NAME}
+    [[ "$VHDX_NAME" != *.vhdx ]] && VHDX_NAME="${VHDX_NAME}.vhdx"
+}
+
+# Helper: VHDX size
+ask_vhdx_size() {
+    echo -e "\n${BLUE}${BOLD}[Field 5] VHDX Expandable Size${NC}"
+    while true; do
+        read -rp "Enter VHDX max expandable size in GB [default: $VHDX_SIZE]: " input_size
+        input_size=${input_size:-$VHDX_SIZE}
+        if [[ "$input_size" =~ ^[0-9]+$ ]] && [ "$input_size" -ge 20 ]; then
+            VHDX_SIZE="$input_size"
+            break
+        fi
+        echo -e "${RED}Size must be a number of at least 20 GB.${NC}"
+    done
+}
+
+# Helper: User and Machine Configuration
+ask_user_config() {
+    echo -e "\n${BLUE}${BOLD}[Field 6] User & Machine Settings${NC}"
+    read -rp "Enter Local Username [default: $USER_NAME]: " input_user
+    USER_NAME=${input_user:-$USER_NAME}
+
+    read -rp "Enter Password for '$USER_NAME' (leave blank for none): " USER_PASS
+
+    read -rp "Enter Computer/Machine Name [default: $COMPUTER_NAME]: " input_comp
+    COMPUTER_NAME=${input_comp:-$COMPUTER_NAME}
+}
+
+# ------------------------------------------------------------------------------
+# Initial Questions
+# ------------------------------------------------------------------------------
+ask_source_image
+ask_image_index
+ask_output_dir
+ask_vhdx_name
+ask_vhdx_size
+ask_user_config
+
+# ------------------------------------------------------------------------------
+# Review & Edit Loop (Allows user to inspect and change any field before run)
+# ------------------------------------------------------------------------------
+while true; do
+    FINAL_VHDX_PATH="${OUT_DIR:-.}/$VHDX_NAME"
+    echo -e "\n${GREEN}${BOLD}==================== Summary of Settings ====================${NC}"
+    echo -e " [1] Source Image : ${BOLD}$SRC_PATH${NC} (Actual: $ACTUAL_IMAGE_PATH)"
+    echo -e " [2] Image Index  : ${BOLD}$WIM_INDEX${NC}"
+    echo -e " [3] Output Dir   : ${BOLD}$OUT_DIR${NC}"
+    echo -e " [4] VHDX Name    : ${BOLD}$VHDX_NAME${NC} -> ($FINAL_VHDX_PATH)"
+    echo -e " [5] Max Size     : ${BOLD}${VHDX_SIZE}GB Dynamic (Expandable)${NC}"
+    echo -e " [6] User & PC    : User: ${BOLD}$USER_NAME${NC} | Pass: $([ -z "$USER_PASS" ] && echo "(None)" || echo "********") | PC: ${BOLD}$COMPUTER_NAME${NC}"
+    echo -e "     Tagging      : portable operating system 1"
+    echo -e "${GREEN}${BOLD}=============================================================${NC}"
+    echo -e "Options:"
+    echo -e "  - Press ${BOLD}[Enter]${NC} or type ${BOLD}'y'${NC} to START building."
+    echo -e "  - Type a number ${BOLD}(1-6)${NC} to EDIT that specific field."
+    echo -e "  - Type ${BOLD}'q'${NC} to cancel."
+    read -rp "Choose option [Y/1-6/q]: " action_choice
+    action_choice=${action_choice:-"y"}
+
+    case "$action_choice" in
+        [Yy]|"yes"|"YES"|"")
+            break
+            ;;
+        1)
+            ask_source_image
+            ask_image_index
+            ;;
+        2)
+            ask_image_index
+            ;;
+        3)
+            ask_output_dir
+            ;;
+        4)
+            ask_vhdx_name
+            ;;
+        5)
+            ask_vhdx_size
+            ;;
+        6)
+            ask_user_config
+            ;;
+        [Qq]|"quit"|"cancel")
+            echo -e "${YELLOW}Operation cancelled by user.${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Please choose 1-6 to edit or press Enter to start.${NC}"
+            ;;
+    esac
 done
 
-ACTUAL_IMAGE_PATH="$SRC_PATH"
-
-if [[ "$SRC_PATH" =~ \.[iI][sS][oO]$ ]]; then
-    echo -e "${CYAN}[*] ISO detected. Mounting temporarily...${NC}"
-    ISO_MOUNT_DIR="/mnt/iso_tmp_$$"
-    sudo mkdir -p "$ISO_MOUNT_DIR"
-    sudo mount -o loop,ro "$SRC_PATH" "$ISO_MOUNT_DIR"
-    
-    if [ -f "$ISO_MOUNT_DIR/sources/install.wim" ]; then
-        ACTUAL_IMAGE_PATH="$ISO_MOUNT_DIR/sources/install.wim"
-    elif [ -f "$ISO_MOUNT_DIR/sources/install.esd" ]; then
-        ACTUAL_IMAGE_PATH="$ISO_MOUNT_DIR/sources/install.esd"
-    else
-        echo -e "${RED}[ERROR] Neither install.wim nor install.esd found in the ISO.${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}Found valid image inside ISO: $ACTUAL_IMAGE_PATH${NC}"
-fi
-
-# List editions
-echo -e "\n${CYAN}Available Editions:${NC}"
-wiminfo "$ACTUAL_IMAGE_PATH" | grep -E "Index:|Name:|Architecture:" || true
-echo ""
-
-TOTAL_IMAGES=$(wiminfo "$ACTUAL_IMAGE_PATH" | grep "Image Count:" | awk '{print $3}')
-TOTAL_IMAGES=${TOTAL_IMAGES:-1}
-
-while true; do
-    read -rp "Enter Image Index (1 to $TOTAL_IMAGES) [default: 1]: " WIM_INDEX
-    WIM_INDEX=${WIM_INDEX:-1}
-    if [[ "$WIM_INDEX" =~ ^[0-9]+$ ]] && [ "$WIM_INDEX" -ge 1 ] && [ "$WIM_INDEX" -le "$TOTAL_IMAGES" ]; then
-        break
-    fi
-    echo -e "${RED}Invalid index. Must be between 1 and $TOTAL_IMAGES.${NC}"
-done
-
-# Step 2: Output Configuration
-echo -e "\n${BLUE}${BOLD}[2/5] VHDX Configuration${NC}"
-read -e -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
-OUT_DIR=${OUT_DIR:-"$(pwd)"}
-OUT_DIR="${OUT_DIR/#\~/$HOME}"
-OUT_DIR="${OUT_DIR%/}"
-mkdir -p "$OUT_DIR"
-
+# Disk Space Pre-flight Check
 AVAIL_KB=$(df -P "$OUT_DIR" | awk 'NR==2 {print $4}')
 AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
 if [ "$AVAIL_GB" -lt 20 ]; then
@@ -235,11 +362,7 @@ if [ "$AVAIL_GB" -lt 20 ]; then
     fi
 fi
 
-read -rp "Enter output VHDX filename [default: Win11.vhdx]: " VHDX_NAME
-VHDX_NAME=${VHDX_NAME:-"Win11.vhdx"}
-[[ "$VHDX_NAME" != *.vhdx ]] && VHDX_NAME="${VHDX_NAME}.vhdx"
-FINAL_VHDX_PATH="${OUT_DIR:-.}/$VHDX_NAME"
-
+# Overwrite check
 if [ -f "$FINAL_VHDX_PATH" ]; then
     echo -e "${YELLOW}File '$FINAL_VHDX_PATH' already exists.${NC}"
     read -rp "Overwrite existing file? [y/N]: " OVERWRITE
@@ -250,43 +373,19 @@ if [ -f "$FINAL_VHDX_PATH" ]; then
     rm -f "$FINAL_VHDX_PATH"
 fi
 
-read -rp "Enter VHDX max expandable size in GB [default: 100]: " VHDX_SIZE
-VHDX_SIZE=${VHDX_SIZE:-100}
-
-# Step 3: User Accounts (Dynamic default to current session user)
-echo -e "\n${BLUE}${BOLD}[3/5] User & System Configuration${NC}"
-read -rp "Enter Local Username [default: $DETECTED_USER]: " USER_NAME
-USER_NAME=${USER_NAME:-"$DETECTED_USER"}
-
-read -rp "Enter Password for '$USER_NAME' (leave blank for none): " USER_PASS
-USER_PASS=${USER_PASS:-""}
-
-read -rp "Enter Computer/Machine Name [default: PORTABLE-PC]: " COMPUTER_NAME
-COMPUTER_NAME=${COMPUTER_NAME:-"PORTABLE-PC"}
-
 XML_USER=$(escape_xml "$USER_NAME")
 XML_PASS=$(escape_xml "$USER_PASS")
 XML_COMP=$(escape_xml "$COMPUTER_NAME")
 
-echo -e "\n${GREEN}Summary of settings:${NC}"
-echo " - Source Image : $ACTUAL_IMAGE_PATH (Index: $WIM_INDEX)"
-echo " - Target VHDX  : $FINAL_VHDX_PATH (${VHDX_SIZE}GB Dynamic)"
-echo " - User Account : $USER_NAME"
-echo " - Password     : $([ -z "$USER_PASS" ] && echo "(None)" || echo "********")"
-echo " - Tagging      : portable operating system 1"
-echo ""
-read -rp "Start processing? [Y/n]: " CONFIRM
-CONFIRM=${CONFIRM:-"Y"}
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    echo -e "${YELLOW}Aborted by user.${NC}"
-    exit 0
-fi
+# ------------------------------------------------------------------------------
+# Build Execution
+# ------------------------------------------------------------------------------
 
-# Step 4: Create dynamic VHDX
+# Step 1: Create dynamic VHDX
 echo -e "\n${BLUE}[*] Step 1: Creating dynamic expandable VHDX (${VHDX_SIZE}G)...${NC}"
 qemu-img create -f vhdx -o subformat=dynamic,block_size=2M "$FINAL_VHDX_PATH" "${VHDX_SIZE}G"
 
-# Step 5: Connect NBD
+# Step 2: Connect NBD
 echo -e "${BLUE}[*] Step 2: Allocating free NBD device...${NC}"
 if ! ALLOCATED_NBD=$(find_free_nbd); then
     echo -e "${RED}[ERROR] No free NBD devices available.${NC}"
@@ -297,7 +396,7 @@ echo -e "${GREEN}Connected device: $ALLOCATED_NBD${NC}"
 sudo qemu-nbd --connect="$ALLOCATED_NBD" "$FINAL_VHDX_PATH"
 sudo udevadm settle
 
-# Step 6: Windows-Compliant GPT Layout (16MB MSR Partition 1 + NTFS OS Partition 2)
+# Step 3: Windows-Compliant GPT Layout (16MB MSR Partition 1 + NTFS OS Partition 2)
 echo -e "${BLUE}[*] Step 3: Partitioning Windows GPT layout (MSR + NTFS)...${NC}"
 sudo parted -s "$ALLOCATED_NBD" mklabel gpt
 # Partition 1: 16MB Microsoft Reserved (MSR) Partition
@@ -328,20 +427,20 @@ START_SECTOR=$(cat "/sys/block/${NBD_BASE}/${PART_BASE}/start" 2>/dev/null || ec
 echo -e "${CYAN}[*] Formatting NTFS with aligned geometry (Start Sector: ${START_SECTOR}, Heads: 255, Sectors: 63)...${NC}"
 sudo mkfs.ntfs -f -L "VHDWindows" -p "$START_SECTOR" -H 255 -S 63 "$PART_DEV"
 
-# Step 7: Mounting
+# Step 4: Mounting
 echo -e "${BLUE}[*] Step 4: Mounting filesystem...${NC}"
 MOUNT_DIR="/mnt/vhdwin_tmp_$$"
 sudo mkdir -p "$MOUNT_DIR"
 sudo mount "$PART_DEV" "$MOUNT_DIR"
 
-# Step 8: Apply image with process monitoring
+# Step 5: Apply image with process monitoring
 echo -e "${BLUE}[*] Step 5: Applying image index $WIM_INDEX to VHDX...${NC}"
 sudo wimapply "$ACTUAL_IMAGE_PATH" "$WIM_INDEX" "$MOUNT_DIR" &
 ACTIVE_CHILD_PID=$!
 wait "$ACTIVE_CHILD_PID"
 ACTIVE_CHILD_PID=""
 
-# Step 9: Inject unattended XML (Bypass OOBE + Specialize pass)
+# Step 6: Inject unattended XML (Bypass OOBE + Specialize pass)
 echo -e "${BLUE}[*] Step 6: Injecting unattended OOBE bypass and Specialize rules...${NC}"
 sudo mkdir -p "$MOUNT_DIR/Windows/Panther" "$MOUNT_DIR/Windows/System32/Sysprep"
 
@@ -416,7 +515,7 @@ INNER_EOF
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/Windows/System32/Sysprep/unattend.xml"
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/autounattend.xml"
 
-# Step 10: Direct Offline Registry Patching (Critical for 0x7B / Inaccessible Boot Device prevention)
+# Step 7: Direct Offline Registry Patching (Critical for 0x7B / Inaccessible Boot Device prevention)
 echo -e "${BLUE}[*] Step 7: Injecting PortableOperatingSystem into offline SYSTEM registry...${NC}"
 SYS_HIVE="$MOUNT_DIR/Windows/System32/config/SYSTEM"
 if [ -f "$SYS_HIVE" ]; then
@@ -430,12 +529,10 @@ try:
     if cs:
         ctrl = h.node_get_child(cs[0], 'Control')
         if ctrl:
-            # Set PortableOperatingSystem = 1 (REG_DWORD)
             val = {'key': 'PortableOperatingSystem', 't': 4, 'value': struct.pack('<I', 1)}
             h.node_set_value(ctrl, val)
         services = h.node_get_child(cs[0], 'Services')
         if services:
-            # Ensure vhdmp and fsdepends boot storage drivers load at Boot (Start = 0)
             for sname in ['vhdmp', 'fsdepends']:
                 snode = h.node_get_child(services, sname)
                 if snode:
@@ -447,7 +544,7 @@ except Exception as e:
 " || true
 fi
 
-# Step 11: Safely unmount and detach
+# Step 8: Safely unmount and detach
 echo -e "${BLUE}[*] Step 8: Syncing filesystem cache...${NC}"
 sudo sync
 sudo umount "$MOUNT_DIR"
@@ -463,7 +560,7 @@ if [ -n "$ISO_MOUNT_DIR" ]; then
     ISO_MOUNT_DIR=""
 fi
 
-# Step 12: Shrink & Compact VHDX
+# Step 9: Shrink & Compact VHDX
 echo -e "${BLUE}[*] Step 9: Compacting VHDX to reclaim unallocated space...${NC}"
 COMPACT_TMP="${FINAL_VHDX_PATH}.compacting"
 if qemu-img convert -f vhdx -O vhdx -o subformat=dynamic,block_size=2M "$FINAL_VHDX_PATH" "$COMPACT_TMP" 2>/dev/null; then
