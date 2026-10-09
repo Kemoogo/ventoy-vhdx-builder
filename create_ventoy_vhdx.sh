@@ -3,6 +3,9 @@
 # ==============================================================================
 # Script: create_ventoy_vhdx.sh (Industrial-Grade Robust & Force-Kill Safe)
 # Features:
+#   - Windows-Compliant GPT Layout (16MB MSR Partition + NTFS OS Partition)
+#   - NTFS Boot Sector Geometry Alignment (-p start -H 255 -S 63)
+#   - Automatic Offline Registry Injection (PortableOperatingSystem = 1)
 #   - True Dynamic VHDX Allocation & Post-build Compaction (Zero-Bloat)
 #   - Dynamic Username default based on current session ($USER)
 #   - Full Tab Autocompletion (Readline enabled via read -e)
@@ -81,7 +84,7 @@ cleanup() {
     if [ -n "$ALLOCATED_NBD" ] && [ -b "$ALLOCATED_NBD" ]; then
         echo -e "${YELLOW} - Disconnecting virtual disk device ($ALLOCATED_NBD)...${NC}"
         sudo qemu-nbd --disconnect "$ALLOCATED_NBD" 2>/dev/null || true
-        if [ -b "${ALLOCATED_NBD}p1" ]; then
+        if [ -b "${ALLOCATED_NBD}p2" ] || [ -b "${ALLOCATED_NBD}p1" ]; then
             sleep 1
             sudo blockdev --flushbufs "$ALLOCATED_NBD" 2>/dev/null || true
             sudo qemu-nbd --disconnect "$ALLOCATED_NBD" 2>/dev/null || true
@@ -155,11 +158,11 @@ if ! sudo -v &>/dev/null; then
 fi
 
 # Check Tools
-REQUIRED_TOOLS=("qemu-img" "qemu-nbd" "wimapply" "wiminfo" "parted" "mkfs.ntfs" "udevadm")
+REQUIRED_TOOLS=("qemu-img" "qemu-nbd" "wimapply" "wiminfo" "parted" "mkfs.ntfs" "udevadm" "python3")
 for cmd in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
         echo -e "${RED}[ERROR] Missing dependency: $cmd${NC}"
-        echo -e "${YELLOW}Install via: sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc${NC}"
+        echo -e "${YELLOW}Install via: sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc python3 python3-hivex${NC}"
         exit 1
     fi
 done
@@ -294,14 +297,21 @@ echo -e "${GREEN}Connected device: $ALLOCATED_NBD${NC}"
 sudo qemu-nbd --connect="$ALLOCATED_NBD" "$FINAL_VHDX_PATH"
 sudo udevadm settle
 
-# Step 6: Partitioning (Single NTFS Partition tailored for Ventoy VHD-Boot)
-echo -e "${BLUE}[*] Step 3: Partitioning GPT and formatting NTFS...${NC}"
+# Step 6: Windows-Compliant GPT Layout (16MB MSR Partition 1 + NTFS OS Partition 2)
+echo -e "${BLUE}[*] Step 3: Partitioning Windows GPT layout (MSR + NTFS)...${NC}"
 sudo parted -s "$ALLOCATED_NBD" mklabel gpt
-sudo parted -s "$ALLOCATED_NBD" mkpart primary ntfs 1MiB 100%
+# Partition 1: 16MB Microsoft Reserved (MSR) Partition
+sudo parted -s "$ALLOCATED_NBD" mkpart primary 2048s 34815s
+sudo parted -s "$ALLOCATED_NBD" name 1 "Microsoft reserved partition"
+sudo parted -s "$ALLOCATED_NBD" set 1 msftres on
+# Partition 2: NTFS OS Data Partition
+sudo parted -s "$ALLOCATED_NBD" mkpart primary ntfs 34816s 100%
+sudo parted -s "$ALLOCATED_NBD" name 2 "Basic data partition"
+sudo parted -s "$ALLOCATED_NBD" set 2 msftdata on
 sudo udevadm settle
 sleep 1
 
-PART_DEV="${ALLOCATED_NBD}p1"
+PART_DEV="${ALLOCATED_NBD}p2"
 if [ ! -b "$PART_DEV" ]; then
     echo -e "${YELLOW}Refreshing partition table...${NC}"
     sudo partx -u "$ALLOCATED_NBD" 2>/dev/null || true
@@ -313,7 +323,12 @@ if [ ! -b "$PART_DEV" ]; then
     exit 1
 fi
 
-sudo mkfs.ntfs -f -L "VHDWindows" "$PART_DEV"
+# Format NTFS with exact partition start sector and geometry (Fixes INACCESSIBLE_BOOT_DEVICE)
+NBD_BASE=$(basename "$ALLOCATED_NBD")
+PART_BASE=$(basename "$PART_DEV")
+START_SECTOR=$(cat "/sys/block/${NBD_BASE}/${PART_BASE}/start" 2>/dev/null || echo "34816")
+echo -e "${CYAN}[*] Formatting NTFS with aligned geometry (Start Sector: ${START_SECTOR}, Heads: 255, Sectors: 63)...${NC}"
+sudo mkfs.ntfs -f -L "VHDWindows" -p "$START_SECTOR" -H 255 -S 63 "$PART_DEV"
 
 # Step 7: Mounting
 echo -e "${BLUE}[*] Step 4: Mounting filesystem...${NC}"
@@ -328,13 +343,27 @@ ACTIVE_CHILD_PID=$!
 wait "$ACTIVE_CHILD_PID"
 ACTIVE_CHILD_PID=""
 
-# Step 9: Inject unattended XML
-echo -e "${BLUE}[*] Step 6: Injecting unattended OOBE bypass...${NC}"
+# Step 9: Inject unattended XML (Bypass OOBE + Specialize pass)
+echo -e "${BLUE}[*] Step 6: Injecting unattended OOBE bypass and Specialize rules...${NC}"
 sudo mkdir -p "$MOUNT_DIR/Windows/Panther" "$MOUNT_DIR/Windows/System32/Sysprep"
 
 cat <<INNER_EOF | sudo tee "$MOUNT_DIR/Windows/Panther/unattend.xml" > /dev/null
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" language="neutral" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Path>reg add HKLM\SYSTEM\CurrentControlSet\Control /v PortableOperatingSystem /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <AutoLogon>
@@ -389,14 +418,35 @@ INNER_EOF
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/Windows/System32/Sysprep/unattend.xml"
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/autounattend.xml"
 
-# Step 10: EFI Bootloader (Windows Boot Structure)
-echo -e "${BLUE}[*] Step 7: Setting up boot files...${NC}"
-sudo mkdir -p "$MOUNT_DIR/EFI/Boot" "$MOUNT_DIR/EFI/Microsoft/Boot"
-if [ -d "$MOUNT_DIR/Windows/Boot/EFI" ]; then
-    sudo cp -r "$MOUNT_DIR/Windows/Boot/EFI/"* "$MOUNT_DIR/EFI/Microsoft/Boot/" 2>/dev/null || true
-    if [ -f "$MOUNT_DIR/Windows/Boot/EFI/bootmgfw.efi" ]; then
-        sudo cp "$MOUNT_DIR/Windows/Boot/EFI/bootmgfw.efi" "$MOUNT_DIR/EFI/Boot/bootx64.efi"
-    fi
+# Step 10: Direct Offline Registry Patching (Critical for 0x7B / Inaccessible Boot Device prevention)
+echo -e "${BLUE}[*] Step 7: Injecting PortableOperatingSystem into offline SYSTEM registry...${NC}"
+SYS_HIVE="$MOUNT_DIR/Windows/System32/config/SYSTEM"
+if [ -f "$SYS_HIVE" ]; then
+    python3 -c "
+import hivex, struct, sys
+
+try:
+    h = hivex.Hivex('$SYS_HIVE', write=True)
+    root = h.root()
+    cs = [c for c in h.node_children(root) if h.node_name(c).lower() == 'controlset001']
+    if cs:
+        ctrl = h.node_get_child(cs[0], 'Control')
+        if ctrl:
+            # Set PortableOperatingSystem = 1 (REG_DWORD)
+            val = {'key': 'PortableOperatingSystem', 't': 4, 'value': struct.pack('<I', 1)}
+            h.node_set_value(ctrl, val)
+        services = h.node_get_child(cs[0], 'Services')
+        if services:
+            # Ensure vhdmp and fsdepends boot storage drivers load at Boot (Start = 0)
+            for sname in ['vhdmp', 'fsdepends']:
+                snode = h.node_get_child(services, sname)
+                if snode:
+                    h.node_set_value(snode, {'key': 'Start', 't': 4, 'value': struct.pack('<I', 0)})
+    h.commit('$SYS_HIVE')
+    print('  [+] Offline SYSTEM registry successfully patched for Portable VHD boot.')
+except Exception as e:
+    print(f'  [!] Registry injection notice: {e}', file=sys.stderr)
+" || true
 fi
 
 # Step 11: Safely unmount and detach
@@ -437,7 +487,7 @@ echo -e "VHDX File     : ${BOLD}$FINAL_VHDX_PATH${NC}"
 echo -e "Actual Space  : ${BOLD}$REAL_SIZE${NC} (Virtual limit: ${VHDX_SIZE}GB)"
 echo ""
 echo -e "${CYAN}${BOLD}Ventoy VHD Boot Setup & Official Resources:${NC}"
-echo -e "For Ventoy to boot Windows VHD/VHDX, download the official plugin:"
+echo -e "For Ventoy to boot Windows VHD/VHDX, make sure the official plugin is on your USB:"
 echo -e "  🌐 ${BOLD}Official Guide:${NC} https://www.ventoy.net/en/plugin_vhd.html"
 echo -e "  📥 ${BOLD}Download Plugin:${NC} https://github.com/ventoy/vhdiso/releases"
 echo ""
@@ -445,7 +495,7 @@ echo -e "${YELLOW}Quick Steps:${NC}"
 echo "1. Download 'ventoy_vhdboot.zip' from the link above and extract 'ventoy_vhdboot.img'."
 echo "2. On your Ventoy USB, create a folder named 'ventoy' in root."
 echo "3. Copy 'ventoy_vhdboot.img' to '/ventoy/ventoy_vhdboot.img'."
-echo "4. Copy '$VHDX_NAME' to anywhere on your Ventoy USB."
+echo "4. Copy '$(basename "$FINAL_VHDX_PATH")' to anywhere on your Ventoy USB."
 echo "   (Tip: In Linux use sparse copy: cp --sparse=always \"$FINAL_VHDX_PATH\" /path/to/usb/)"
 echo "5. Boot from Ventoy and enjoy portable Windows!"
 echo "=========================================================="

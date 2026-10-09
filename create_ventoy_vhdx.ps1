@@ -4,8 +4,8 @@
 .DESCRIPTION
     Creates a bootable VHDX, mounts it, applies install.wim/install.esd/ISO via DISM,
     injects unattended answer file (portable operating system 1) to bypass OOBE,
+    patches offline registry for PortableOperatingSystem and boot storage drivers,
     and generates UEFI boot files via bcdboot.
-    Includes advanced Forced Termination, Tab Completion, and clean Ventoy official guidance.
 #>
 
 #Requires -RunAsAdministrator
@@ -262,6 +262,7 @@ create vdisk file="$script:finalVhdxPath" maximum=$vhdxSizeMb type=expandable
 select vdisk file="$script:finalVhdxPath"
 attach vdisk
 convert gpt
+create partition msr size=16
 create partition primary
 format fs=ntfs quick label="VHDWindows"
 assign letter=$script:targetDrive
@@ -299,6 +300,20 @@ assign letter=$script:targetDrive
     $unattendXmlContent = @"
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <settings pass="specialize">
+        <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" language="neutral" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" publicKeyToken="31bf3856ad364e35" versionScope="nonSxS">
+            <RunSynchronous>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>1</Order>
+                    <Path>reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
+                    <Order>2</Order>
+                    <Path>reg add HKLM\SYSTEM\CurrentControlSet\Control /v PortableOperatingSystem /t REG_DWORD /d 1 /f</Path>
+                </RunSynchronousCommand>
+            </RunSynchronous>
+        </component>
+    </settings>
     <settings pass="oobeSystem">
         <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <AutoLogon>
@@ -353,10 +368,21 @@ assign letter=$script:targetDrive
     [System.IO.File]::WriteAllText((Join-Path $sysprepDir "unattend.xml"), $unattendXmlContent, [System.Text.Encoding]::UTF8)
     [System.IO.File]::WriteAllText((Join-Path $vhdDriveRoot "autounattend.xml"), $unattendXmlContent, [System.Text.Encoding]::UTF8)
 
-    # 8. Configure BCD
-    Write-Color "`n[*] Step 4: Generating BCD Bootloader via bcdboot..." Cyan
-    $winDir = Join-Path $vhdDriveRoot "Windows"
-    & bcdboot.exe "$winDir" /s "$($script:targetDrive):" /f ALL | Out-Null
+    # 8. Direct Offline Registry Modification (PortableOperatingSystem = 1 & Boot drivers)
+    Write-Color "`n[*] Step 4: Injecting PortableOperatingSystem into offline SYSTEM registry..." Cyan
+    $sysHivePath = Join-Path $vhdDriveRoot "Windows\System32\config\SYSTEM"
+    if (Test-Path $sysHivePath) {
+        & reg.exe load HKLM\VHD_OFFLINE_SYSTEM "$sysHivePath" | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Control" /v PortableOperatingSystem /t REG_DWORD /d 1 /f | Out-Null
+            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Services\vhdmp" /v Start /t REG_DWORD /d 0 /f | Out-Null
+            & reg.exe add "HKLM\VHD_OFFLINE_SYSTEM\ControlSet001\Services\fsdepends" /v Start /t REG_DWORD /d 0 /f | Out-Null
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            & reg.exe unload HKLM\VHD_OFFLINE_SYSTEM | Out-Null
+            Write-Color "  [+] Offline registry successfully patched." Green
+        }
+    }
 
     $script:operationCompleted = $true
 
