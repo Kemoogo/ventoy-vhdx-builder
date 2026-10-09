@@ -3,6 +3,7 @@
 # ==============================================================================
 # Script: create_ventoy_vhdx.sh (Industrial-Grade Robust & Force-Kill Safe)
 # Features:
+#   - Full Tab Autocompletion (Readline enabled via read -e)
 #   - Full Process Group & Signal Trap handling (INT, TERM, HUP, QUIT, EXIT)
 #   - Process Killer for child background tasks (wimapply, qemu-nbd, wget)
 #   - Force-unmount & Lazy-unmount (umount -l / fuser -km) to kill busy locks
@@ -37,7 +38,6 @@ OPERATION_COMPLETED=false
 # ------------------------------------------------------------------------------
 cleanup() {
     local exit_code=$?
-    # Temporarily ignore signals during cleanup to avoid recursion
     trap '' INT TERM HUP QUIT EXIT
 
     if [ "$OPERATION_COMPLETED" = false ]; then
@@ -46,7 +46,7 @@ cleanup() {
         echo -e "\n${GREEN}[*] Finalizing and cleaning temporary mounts...${NC}"
     fi
 
-    # 1. Kill any running child process (e.g. wimapply, wget, qemu-img)
+    # 1. Kill any running child process (wimapply, wget, qemu-img)
     if [ -n "$ACTIVE_CHILD_PID" ] && kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null; then
         echo -e "${YELLOW} - Terminating running background process (PID: $ACTIVE_CHILD_PID)...${NC}"
         sudo kill -TERM "$ACTIVE_CHILD_PID" 2>/dev/null || true
@@ -54,14 +54,12 @@ cleanup() {
         sudo kill -KILL "$ACTIVE_CHILD_PID" 2>/dev/null || true
     fi
 
-    # Kill any dangling wimapply processes spawned under this script
     sudo pkill -P $$ 2>/dev/null || true
 
     # 2. Release & Force-unmount VHD directory
     if [ -n "$MOUNT_DIR" ]; then
         if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
             echo -e "${YELLOW} - Unmounting VHD filesystem ($MOUNT_DIR)...${NC}"
-            # Kill processes locking the mount point
             if command -v fuser &>/dev/null; then
                 sudo fuser -km "$MOUNT_DIR" 2>/dev/null || true
             fi
@@ -75,7 +73,6 @@ cleanup() {
     if [ -n "$ALLOCATED_NBD" ] && [ -b "$ALLOCATED_NBD" ]; then
         echo -e "${YELLOW} - Disconnecting virtual disk device ($ALLOCATED_NBD)...${NC}"
         sudo qemu-nbd --disconnect "$ALLOCATED_NBD" 2>/dev/null || true
-        # In case device is stubborn, force reset
         if [ -b "${ALLOCATED_NBD}p1" ]; then
             sleep 1
             sudo blockdev --flushbufs "$ALLOCATED_NBD" 2>/dev/null || true
@@ -95,7 +92,7 @@ cleanup() {
         [ -d "$ISO_MOUNT_DIR" ] && sudo rmdir "$ISO_MOUNT_DIR" 2>/dev/null || true
     fi
 
-    # 5. Remove incomplete/corrupted VHDX if operation was cancelled
+    # 5. Remove incomplete/corrupted VHDX if cancelled
     if [ "$OPERATION_COMPLETED" = false ] && [ -n "$FINAL_VHDX_PATH" ] && [ -f "$FINAL_VHDX_PATH" ]; then
         echo -e "${YELLOW} - Removing incomplete/corrupted VHDX image: $FINAL_VHDX_PATH${NC}"
         sudo rm -f "$FINAL_VHDX_PATH" 2>/dev/null || true
@@ -107,7 +104,6 @@ cleanup() {
     fi
 }
 
-# Trap all termination signals
 trap cleanup INT TERM HUP QUIT EXIT
 
 # XML Escape Helper
@@ -160,10 +156,13 @@ for cmd in "${REQUIRED_TOOLS[@]}"; do
     fi
 done
 
-# Step 1: Image source
+# Step 1: Image source with Tab Completion enabled (read -e)
 echo -e "${BLUE}${BOLD}[1/5] Image Source (.wim / .esd / .iso)${NC}"
+echo -e "${YELLOW}(Tip: You can use [TAB] key for path auto-completion)${NC}"
 while true; do
-    read -rp "Enter path to Windows ISO, install.wim, or install.esd: " SRC_PATH
+    read -e -rp "Enter path to Windows ISO, install.wim, or install.esd: " SRC_PATH
+    # Expand tilde (~) and clean quotes
+    SRC_PATH="${SRC_PATH/#\~/$HOME}"
     SRC_PATH="$(echo "$SRC_PATH" | xargs)"
     if [ -f "$SRC_PATH" ]; then
         break
@@ -208,10 +207,11 @@ while true; do
     echo -e "${RED}Invalid index. Must be between 1 and $TOTAL_IMAGES.${NC}"
 done
 
-# Step 2: Output Configuration
+# Step 2: Output Configuration with Tab Completion (read -e)
 echo -e "\n${BLUE}${BOLD}[2/5] VHDX Configuration${NC}"
-read -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
+read -e -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
 OUT_DIR=${OUT_DIR:-"$(pwd)"}
+OUT_DIR="${OUT_DIR/#\~/$HOME}"
 mkdir -p "$OUT_DIR"
 
 AVAIL_KB=$(df -P "$OUT_DIR" | awk 'NR==2 {print $4}')
@@ -425,7 +425,6 @@ if [ ! -f "$OUT_DIR/ventoy_vhdboot.img" ]; then
     fi
 fi
 
-# Mark completed so cleanup won't wipe the file
 OPERATION_COMPLETED=true
 
 echo -e "\n${GREEN}${BOLD}=========================================================="

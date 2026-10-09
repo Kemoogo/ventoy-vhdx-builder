@@ -5,7 +5,7 @@
     Creates a bootable VHDX, mounts it, applies install.wim/install.esd/ISO via DISM,
     injects unattended answer file (portable operating system 1) to bypass OOBE,
     generates UEFI boot files via bcdboot, and downloads ventoy_vhdboot.img.
-    Includes advanced Forced Termination & Interruption handlers.
+    Includes advanced Forced Termination & Tab Completion.
 #>
 
 #Requires -RunAsAdministrator
@@ -38,6 +38,24 @@ if (-not $isAdmin) {
 }
 
 Show-Header
+
+# Helper for Tab-Completion in PowerShell Read-Host
+function Read-HostWithTab([string]$prompt) {
+    Write-Host $prompt -NoNewline -ForegroundColor Cyan
+    Write-Host " (Tab auto-complete enabled): " -NoNewline -ForegroundColor Yellow
+    
+    # Check if PSReadLine is available (standard in PowerShell 5.1+)
+    if (Get-Module -Name PSReadLine) {
+        return (Read-Host)
+    } else {
+        try {
+            Import-Module PSReadLine -ErrorAction SilentlyContinue
+            return (Read-Host)
+        } catch {
+            return (Read-Host)
+        }
+    }
+}
 
 # State variables for robust cleanup & force-termination
 $script:mountedIsoPath = $null
@@ -85,7 +103,6 @@ detach vdisk
     }
 }
 
-# Trap PowerShell Console cancellation (Ctrl+C / Interruption)
 [Console]::TreatControlCAsInput = $false
 $script:sigintEvent = Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
     if (-not $script:operationCompleted) {
@@ -109,12 +126,12 @@ function Get-FreeDriveLetter {
 }
 
 try {
-    # 2. Image Selection
+    # 2. Image Selection with Tab-Complete
     Write-Color "[1/5] Image Source (.iso / .wim / .esd)" Green
     $imagePath = ""
 
     while ($true) {
-        $inputPath = Read-Host "Enter path to Windows ISO, install.wim, or install.esd"
+        $inputPath = Read-HostWithTab "Enter path to Windows ISO, install.wim, or install.esd"
         $inputPath = $inputPath.Trim('"', "'", " ")
         
         if (Test-Path -Path $inputPath -PathType Leaf) {
@@ -169,16 +186,15 @@ try {
         Write-Color "Please enter a valid numeric index." Red
     }
 
-    # 3. VHDX Options
+    # 3. VHDX Options with Tab-Complete
     Write-Color "`n[2/5] VHDX Configuration" Green
     $defaultOutDir = (Get-Location).Path
-    $outDirInput = Read-Host "Enter output directory [default: $defaultOutDir]"
+    $outDirInput = Read-HostWithTab "Enter output directory [default: $defaultOutDir]"
     $outDir = if ([string]::IsNullOrWhiteSpace($outDirInput)) { $defaultOutDir } else { $outDirInput.Trim('"', "'", " ") }
     if (-not (Test-Path $outDir)) {
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
     }
 
-    # Space check
     $outDriveRoot = [System.IO.Path]::GetPathRoot($outDir)
     $driveInfo = Get-PSDrive ($outDriveRoot.TrimEnd(':\')) -ErrorAction SilentlyContinue
     if ($driveInfo) {
@@ -343,7 +359,6 @@ assign letter=$script:targetDrive
     $winDir = Join-Path $vhdDriveRoot "Windows"
     & bcdboot.exe "$winDir" /s "$($script:targetDrive):" /f ALL | Out-Null
 
-    # Mark as completed
     $script:operationCompleted = $true
 
 } catch {
@@ -353,7 +368,6 @@ assign letter=$script:targetDrive
 }
 
 if ($script:operationCompleted) {
-    # 9. Ventoy Plugin
     Write-Color "`n[*] Step 5: Checking Ventoy vhdboot plugin..." Cyan
     $pluginDest = Join-Path $outDir "ventoy_vhdboot.img"
     if (-not (Test-Path $pluginDest)) {
