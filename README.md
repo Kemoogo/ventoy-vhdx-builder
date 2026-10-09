@@ -16,8 +16,9 @@ Runs natively on both **Linux** and **Windows** without requiring virtual machin
 ### About Ventoy
 [Ventoy](https://www.ventoy.net) is an open-source tool to create bootable USB drives for ISO/WIM/IMG/VHD(x)/EFI files.
 * **Official Website:** [https://www.ventoy.net](https://www.ventoy.net)
+* **Official VHD Plugin Documentation:** [https://www.ventoy.net/en/plugin_vhd.html](https://www.ventoy.net/en/plugin_vhd.html)
 * **GitHub Repository:** [ventoy/Ventoy](https://github.com/ventoy/Ventoy)
-* **Ventoy VHD Boot Plugin Repo:** [ventoy/vhdiso](https://github.com/ventoy/vhdiso)
+* **Ventoy VHD Plugin Releases:** [ventoy/vhdiso Releases](https://github.com/ventoy/vhdiso/releases)
 
 ### Key Benefits of Ventoy + VHDX (Native VHD Boot)
 1. **No Re-formatting Ever:** Just drop your `.vhdx` file onto the USB drive alongside your existing Linux ISOs and rescue images.
@@ -25,6 +26,19 @@ Runs natively on both **Linux** and **Windows** without requiring virtual machin
 3. **Hardware Independence (Windows-To-Go Alternative):** Modern Windows 10/11 handles plug-and-play driver discovery effortlessly across different motherboards and chipsets.
 4. **Dynamic Expandable Storage:** The VHDX starts small (only ~15–20 GB of actual data used) and grows dynamically up to your specified maximum (e.g. 100 GB).
 5. **Instant Snapshots & Duplication:** To backup or duplicate your entire OS installation, simply copy the single `.vhdx` file.
+
+---
+
+## ❓ Partition Layout: Why Single NTFS Partition instead of Separate EFI?
+
+You might wonder: *Does this script create a separate EFI System Partition (ESP) inside the VHDX?*
+
+**Answer:** **No, by design!** 
+
+When using **Ventoy Native VHD Boot**:
+- **Ventoy’s Bootloader takes over EFI:** Ventoy itself (via its own EFI partition and the `ventoy_vhdboot` hook) acts as the UEFI loader that boots the machine and hooks the virtual disk driver into memory.
+- **Ventoy expects a Single Partition:** Ventoy hooks directly into the primary NTFS partition where Windows and its BCD/boot files live. Creating a split ESP + OS partition structure inside the virtual container is redundant for Ventoy, adds unnecessary partition alignment overhead, and can interfere with the Ventoy VHD hook driver.
+- The script populates the Windows boot structure (`\EFI\Boot\` and `\EFI\Microsoft\Boot\`) directly inside the root volume.
 
 ---
 
@@ -59,7 +73,6 @@ One major flaw of naive disk scripts is that if interrupted (e.g. via `Ctrl+C`, 
 | **User Setup** | Creating account and password | Automated local admin + AutoLogon |
 | **System Branding** | Manual unattend XML authoring | Injected with `"portable operating system 1"` metadata |
 | **UEFI Bootloader** | Manual EFI partition manipulation / `bcdboot` | Automatically provisioned |
-| **Ventoy Plugin** | Hunting for `ventoy_vhdboot.img` on GitHub | Automatically downloaded and verified |
 | **Interruption Safety** | Leaves locked devices, mounts, and corrupted disks | **100% Graceful Force-Kill & Cleanup** |
 
 ---
@@ -86,15 +99,15 @@ Install the required packages:
 * **Ubuntu / Debian / Pop!_OS:**
   ```bash
   sudo apt update
-  sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc wget unzip
+  sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc
   ```
 * **Arch Linux / Manjaro:**
   ```bash
-  sudo pacman -S qemu-img wimlib parted ntfs-3g udev psmisc wget unzip
+  sudo pacman -S qemu-img wimlib parted ntfs-3g udev psmisc
   ```
 * **Fedora / RHEL:**
   ```bash
-  sudo dnf install qemu-img wimtools parted ntfs-3g udev psmisc wget unzip
+  sudo dnf install qemu-img wimtools parted ntfs-3g udev psmisc
   ```
 
 ### 2. Execution
@@ -123,22 +136,24 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ## 📦 Setting Up Your Ventoy USB Drive
 
-Once the script completes, you will have two files in your output directory:
-1. `YourImage.vhdx` (e.g., `test_oobe.vhdx`)
-2. `ventoy_vhdboot.img`
+Once the script completes, you will have your generated `.vhdx` file (e.g. `Win11.vhdx`).
 
 ### Deployment Steps:
-1. Plug in your Ventoy USB drive and open its main partition in your file manager.
-2. In the root of the USB drive, create a folder named `ventoy` (lowercase):
+1. Download the official **Ventoy VHD Boot plugin** (`ventoy_vhdboot.zip`):
+   - **Download Link:** [https://github.com/ventoy/vhdiso/releases](https://github.com/ventoy/vhdiso/releases)
+   - Extract the ZIP archive and get **`ventoy_vhdboot.img`** (under `Win10Based/`).
+2. Open your Ventoy USB drive and create a folder named `ventoy` in the root (if it doesn't already exist):
    ```text
    USB_ROOT/
    └── ventoy/
        └── ventoy_vhdboot.img   <-- Place plugin here!
    ```
-3. Copy your `.vhdx` file anywhere on the Ventoy USB drive (in the root or any subfolder).
-4. Reboot your computer, enter Boot Menu (F12 / F11 / F8), boot from the Ventoy USB, and select your `.vhdx` file.
-
-> **First Boot:** On the very first boot, Windows will detect host hardware devices ("Getting devices ready..."), reboot once, process the unattended answer file, and take you directly to the desktop logged in as your configured user.
+3. Copy your `.vhdx` file anywhere on the Ventoy USB drive.
+   > **Tip for Linux Users:** Use sparse copying to prevent physical bloat on your USB drive:
+   > ```bash
+   > cp --sparse=always Win11.vhdx /media/user/Ventoy/
+   > ```
+4. Reboot your computer, choose the Ventoy USB in your BIOS Boot Menu, select your `.vhdx` file, and enjoy!
 
 ---
 
@@ -153,21 +168,6 @@ The script generates an XML answer file placed in `\Windows\Panther\` and `\Wind
   - `RegisteredOwner`: `portable operating system 1`
   - `RegisteredOrganization`: `portable operating system 1`
   - `Description`: `portable operating system 1`
-
----
-
-## 💡 Future Roadmap & Feature Proposals
-
-- [ ] **Bypass Windows 11 Hardware Restrictions:** Automatic registry injection during provisioning to bypass TPM 2.0, SecureBoot, and 8GB RAM checks.
-- [ ] **Pre-installed Drivers (VirtIO / Wi-Fi):** Option to slipstream Wi-Fi or storage drivers into the offline image via `dism` / `wimlib`.
-- [ ] **Direct-to-USB Copy:** Auto-detect connected Ventoy drives and offer to copy the `.vhdx` and `ventoy_vhdboot.img` automatically after creation.
-- [ ] **Compact OS Compression (`/CompactOS`):** Apply Windows using NTFS LZX compression to reduce footprint down to under 12 GB.
-
----
-
-## 🤝 Contributing & Support
-
-Contributions, bug reports, and suggestions are welcome! Feel free to open an issue or submit a Pull Request.
 
 ---
 

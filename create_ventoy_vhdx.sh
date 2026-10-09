@@ -7,13 +7,15 @@
 #   - Dynamic Username default based on current session ($USER)
 #   - Full Tab Autocompletion (Readline enabled via read -e)
 #   - Process Group & Signal Trap handling (INT, TERM, HUP, QUIT, EXIT)
-#   - Active Child Process Watchdog (wimapply, qemu-nbd, wget)
+#   - Active Child Process Watchdog (wimapply, qemu-nbd)
 #   - Force-unmount & Lazy-unmount (umount -l / fuser -km) to kill busy locks
 #   - Incomplete artifact cleanup (deletes half-written VHDX on cancellation)
 #   - Dynamic free NBD discovery & force-disconnect on abort
 #   - Direct ISO / WIM / ESD support
 #   - XML-safe escaping & "portable operating system 1" branding
 #   - Pre-flight disk space validation & udevadm synchronization
+#   - Path normalization (avoids double slashes)
+#   - Clean Ventoy official VHD documentation guidance
 # ==============================================================================
 
 set -uo pipefail
@@ -52,7 +54,7 @@ cleanup() {
         echo -e "\n${GREEN}[*] Finalizing and cleaning temporary mounts...${NC}"
     fi
 
-    # 1. Kill any running child process (wimapply, wget, qemu-img)
+    # 1. Kill any running child process (wimapply, qemu-img)
     if [ -n "$ACTIVE_CHILD_PID" ] && kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null; then
         echo -e "${YELLOW} - Terminating running background process (PID: $ACTIVE_CHILD_PID)...${NC}"
         sudo kill -TERM "$ACTIVE_CHILD_PID" 2>/dev/null || true
@@ -157,7 +159,7 @@ REQUIRED_TOOLS=("qemu-img" "qemu-nbd" "wimapply" "wiminfo" "parted" "mkfs.ntfs" 
 for cmd in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$cmd" &>/dev/null; then
         echo -e "${RED}[ERROR] Missing dependency: $cmd${NC}"
-        echo -e "${YELLOW}Install via: sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc wget unzip${NC}"
+        echo -e "${YELLOW}Install via: sudo apt install qemu-utils wimtools parted ntfs-3g udev psmisc${NC}"
         exit 1
     fi
 done
@@ -216,7 +218,8 @@ done
 echo -e "\n${BLUE}${BOLD}[2/5] VHDX Configuration${NC}"
 read -e -rp "Enter output directory [default: $(pwd)]: " OUT_DIR
 OUT_DIR=${OUT_DIR:-"$(pwd)"}
-OUT_DIR="${OUT_DIR/#\~/$HOME}"; OUT_DIR="${OUT_DIR%/}"
+OUT_DIR="${OUT_DIR/#\~/$HOME}"
+OUT_DIR="${OUT_DIR%/}"
 mkdir -p "$OUT_DIR"
 
 AVAIL_KB=$(df -P "$OUT_DIR" | awk 'NR==2 {print $4}')
@@ -247,7 +250,7 @@ fi
 read -rp "Enter VHDX max expandable size in GB [default: 100]: " VHDX_SIZE
 VHDX_SIZE=${VHDX_SIZE:-100}
 
-# Step 3: User Accounts (Dynamic default to current user)
+# Step 3: User Accounts (Dynamic default to current session user)
 echo -e "\n${BLUE}${BOLD}[3/5] User & System Configuration${NC}"
 read -rp "Enter Local Username [default: $DETECTED_USER]: " USER_NAME
 USER_NAME=${USER_NAME:-"$DETECTED_USER"}
@@ -276,7 +279,7 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Step 4: Create VHDX with explicit dynamic subformat and optimized block size
+# Step 4: Create dynamic VHDX
 echo -e "\n${BLUE}[*] Step 1: Creating dynamic expandable VHDX (${VHDX_SIZE}G)...${NC}"
 qemu-img create -f vhdx -o subformat=dynamic,block_size=2M "$FINAL_VHDX_PATH" "${VHDX_SIZE}G"
 
@@ -291,7 +294,7 @@ echo -e "${GREEN}Connected device: $ALLOCATED_NBD${NC}"
 sudo qemu-nbd --connect="$ALLOCATED_NBD" "$FINAL_VHDX_PATH"
 sudo udevadm settle
 
-# Step 6: Partitioning
+# Step 6: Partitioning (Single NTFS Partition tailored for Ventoy VHD-Boot)
 echo -e "${BLUE}[*] Step 3: Partitioning GPT and formatting NTFS...${NC}"
 sudo parted -s "$ALLOCATED_NBD" mklabel gpt
 sudo parted -s "$ALLOCATED_NBD" mkpart primary ntfs 1MiB 100%
@@ -386,8 +389,8 @@ INNER_EOF
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/Windows/System32/Sysprep/unattend.xml"
 sudo cp "$MOUNT_DIR/Windows/Panther/unattend.xml" "$MOUNT_DIR/autounattend.xml"
 
-# Step 10: EFI Bootloader
-echo -e "${BLUE}[*] Step 7: Setting up UEFI boot structure...${NC}"
+# Step 10: EFI Bootloader (Windows Boot Structure)
+echo -e "${BLUE}[*] Step 7: Setting up boot files...${NC}"
 sudo mkdir -p "$MOUNT_DIR/EFI/Boot" "$MOUNT_DIR/EFI/Microsoft/Boot"
 if [ -d "$MOUNT_DIR/Windows/Boot/EFI" ]; then
     sudo cp -r "$MOUNT_DIR/Windows/Boot/EFI/"* "$MOUNT_DIR/EFI/Microsoft/Boot/" 2>/dev/null || true
@@ -412,7 +415,7 @@ if [ -n "$ISO_MOUNT_DIR" ]; then
     ISO_MOUNT_DIR=""
 fi
 
-# Step 12: Shrink & Compact VHDX to eliminate any sparse bloat
+# Step 12: Shrink & Compact VHDX
 echo -e "${BLUE}[*] Step 9: Compacting VHDX to reclaim unallocated space...${NC}"
 COMPACT_TMP="${FINAL_VHDX_PATH}.compacting"
 if qemu-img convert -f vhdx -O vhdx -o subformat=dynamic,block_size=2M "$FINAL_VHDX_PATH" "$COMPACT_TMP" 2>/dev/null; then
@@ -425,22 +428,6 @@ fi
 REAL_SIZE=$(du -h "$FINAL_VHDX_PATH" | awk '{print $1}')
 sudo chown "${SUDO_USER:-$USER}:${SUDO_USER:-$USER}" "$FINAL_VHDX_PATH"
 
-# Step 13: Ventoy Plugin
-echo -e "${BLUE}[*] Step 10: Preparing Ventoy vhdboot plugin...${NC}"
-if [ ! -f "$OUT_DIR/ventoy_vhdboot.img" ]; then
-    echo -e "${YELLOW}Downloading Ventoy vhdboot plugin...${NC}"
-    TMP_ZIP="/tmp/ventoy_vhdboot_$$.zip"
-    TMP_DIR="/tmp/ventoy_vhdboot_extract_$$"
-    if wget -q --timeout=15 https://github.com/ventoy/vhdiso/releases/download/v3.0/ventoy_vhdboot.zip -O "$TMP_ZIP"; then
-        unzip -qo "$TMP_ZIP" -d "$TMP_DIR"
-        if [ -f "$TMP_DIR/ventoy_vhdboot/Win10Based/ventoy_vhdboot.img" ]; then
-            cp "$TMP_DIR/ventoy_vhdboot/Win10Based/ventoy_vhdboot.img" "$OUT_DIR/ventoy_vhdboot.img"
-            echo -e "${GREEN}ventoy_vhdboot.img prepared successfully.${NC}"
-        fi
-        rm -rf "$TMP_ZIP" "$TMP_DIR"
-    fi
-fi
-
 OPERATION_COMPLETED=true
 
 echo -e "\n${GREEN}${BOLD}=========================================================="
@@ -448,9 +435,17 @@ echo "                 PROCESS COMPLETED SUCCESSFULLY!          "
 echo "==========================================================${NC}"
 echo -e "VHDX File     : ${BOLD}$FINAL_VHDX_PATH${NC}"
 echo -e "Actual Space  : ${BOLD}$REAL_SIZE${NC} (Virtual limit: ${VHDX_SIZE}GB)"
-echo -e "Ventoy Plugin : ${BOLD}$OUT_DIR/ventoy_vhdboot.img${NC}"
 echo ""
-echo -e "${YELLOW}Notice on Copying to USB:${NC}"
-echo "When copying to your USB drive, use sparse copy to prevent size expansion:"
-echo "  cp --sparse=always \"$FINAL_VHDX_PATH\" /path/to/ventoy/usb/"
+echo -e "${CYAN}${BOLD}Ventoy VHD Boot Setup & Official Resources:${NC}"
+echo -e "For Ventoy to boot Windows VHD/VHDX, download the official plugin:"
+echo -e "  🌐 ${BOLD}Official Guide:${NC} https://www.ventoy.net/en/plugin_vhd.html"
+echo -e "  📥 ${BOLD}Download Plugin:${NC} https://github.com/ventoy/vhdiso/releases"
+echo ""
+echo -e "${YELLOW}Quick Steps:${NC}"
+echo "1. Download 'ventoy_vhdboot.zip' from the link above and extract 'ventoy_vhdboot.img'."
+echo "2. On your Ventoy USB, create a folder named 'ventoy' in root."
+echo "3. Copy 'ventoy_vhdboot.img' to '/ventoy/ventoy_vhdboot.img'."
+echo "4. Copy '$VHDX_NAME' to anywhere on your Ventoy USB."
+echo "   (Tip: In Linux use sparse copy: cp --sparse=always \"$FINAL_VHDX_PATH\" /path/to/usb/)"
+echo "5. Boot from Ventoy and enjoy portable Windows!"
 echo "=========================================================="

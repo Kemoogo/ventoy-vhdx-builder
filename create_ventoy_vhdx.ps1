@@ -4,8 +4,8 @@
 .DESCRIPTION
     Creates a bootable VHDX, mounts it, applies install.wim/install.esd/ISO via DISM,
     injects unattended answer file (portable operating system 1) to bypass OOBE,
-    generates UEFI boot files via bcdboot, and downloads ventoy_vhdboot.img.
-    Includes advanced Forced Termination & Tab Completion.
+    and generates UEFI boot files via bcdboot.
+    Includes advanced Forced Termination, Tab Completion, and clean Ventoy official guidance.
 #>
 
 #Requires -RunAsAdministrator
@@ -39,12 +39,10 @@ if (-not $isAdmin) {
 
 Show-Header
 
-# Helper for Tab-Completion in PowerShell Read-Host
 function Read-HostWithTab([string]$prompt) {
     Write-Host $prompt -NoNewline -ForegroundColor Cyan
     Write-Host " (Tab auto-complete enabled): " -NoNewline -ForegroundColor Yellow
     
-    # Check if PSReadLine is available (standard in PowerShell 5.1+)
     if (Get-Module -Name PSReadLine) {
         return (Read-Host)
     } else {
@@ -369,40 +367,22 @@ assign letter=$script:targetDrive
 }
 
 if ($script:operationCompleted) {
-    Write-Color "`n[*] Step 5: Checking Ventoy vhdboot plugin..." Cyan
-    $pluginDest = Join-Path $outDir "ventoy_vhdboot.img"
-    if (-not (Test-Path $pluginDest)) {
-        Write-Color "[*] Downloading Ventoy vhdboot plugin..." Yellow
-        $zipTemp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ventoy_vhdboot.zip")
-        $extractTemp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "ventoy_vhdboot_extract")
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri "https://github.com/ventoy/vhdiso/releases/download/v3.0/ventoy_vhdboot.zip" -OutFile $zipTemp -UseBasicParsing
-            Expand-Archive -Path $zipTemp -DestinationPath $extractTemp -Force
-            $imgSource = Join-Path $extractTemp "ventoy_vhdboot\Win10Based\ventoy_vhdboot.img"
-            if (Test-Path $imgSource) {
-                Copy-Item -Path $imgSource -Destination $pluginDest -Force
-                Write-Color "[+] Prepared ventoy_vhdboot.img." Green
-            }
-        } catch {
-            Write-Color "[WARNING] Auto-download failed. You can download manually from https://github.com/ventoy/vhdiso/releases" Yellow
-        } finally {
-            if (Test-Path $zipTemp) { Remove-Item $zipTemp -Force }
-            if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
-        }
-    }
-
     Write-Color "`n==========================================================" Green
     Write-Color "                 PROCESS COMPLETED SUCCESSFULLY!          " Green
     Write-Color "==========================================================" Green
     Write-Host "Generated VHDX : $script:finalVhdxPath"
-    Write-Host "Ventoy Plugin  : $pluginDest"
     Write-Host ""
-    Write-Color "Ventoy Deployment Instructions:" Yellow
-    Write-Host "1. On your Ventoy USB drive, create a folder named 'ventoy' in root."
-    Write-Host "2. Copy 'ventoy_vhdboot.img' into that '\ventoy\' folder."
-    Write-Host "3. Copy '$vhdxName' anywhere on the Ventoy USB drive."
-    Write-Host "4. Boot from Ventoy and choose your Windows VHDX!"
+    Write-Color "Ventoy VHD Boot Setup & Official Resources:" Cyan
+    Write-Host "For Ventoy to boot Windows VHD/VHDX, download the official plugin:"
+    Write-Host "  Official Guide : https://www.ventoy.net/en/plugin_vhd.html"
+    Write-Host "  Download Plugin: https://github.com/ventoy/vhdiso/releases"
+    Write-Host ""
+    Write-Color "Quick Steps:" Yellow
+    Write-Host "1. Download 'ventoy_vhdboot.zip' from the link above and extract 'ventoy_vhdboot.img'."
+    Write-Host "2. On your Ventoy USB drive, create a folder named 'ventoy' in root."
+    Write-Host "3. Copy 'ventoy_vhdboot.img' into that '\ventoy\' folder."
+    Write-Host "4. Copy '$vhdxName' anywhere on the Ventoy USB drive."
+    Write-Host "5. Boot from Ventoy and choose your Windows VHDX!"
     Write-Color "==========================================================" Green
 } else {
     Write-Color "`n[!] Build was aborted or encountered errors. System was restored cleanly." Red
