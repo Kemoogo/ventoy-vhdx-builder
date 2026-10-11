@@ -627,8 +627,8 @@ echo "==========================================================${NC}"
 echo -e "VHDX File     : ${BOLD}$FINAL_VHDX_PATH${NC}"
 echo -e "Actual Space  : ${BOLD}$REAL_SIZE${NC} (Virtual limit: ${VHDX_SIZE}GB)"
 
-# Optional Ventoy USB copy helper
-VENTOY_MOUNT=$(lsblk -rn -o MOUNTPOINT,LABEL 2>/dev/null | awk 'tolower($2)=="ventoy" {print $1}' | head -n 1)
+# Optional Ventoy USB copy helper (excludes snap loop devices via -e 7)
+VENTOY_MOUNT=$(lsblk -e 7 -rn -o MOUNTPOINT,LABEL 2>/dev/null | awk 'tolower($2)=="ventoy" {print $1}' | head -n 1)
 if [ -z "$VENTOY_MOUNT" ] || [ ! -d "$VENTOY_MOUNT" ]; then
     VENTOY_MOUNT=$(find /media /run/media -maxdepth 2 -type d -iname "*ventoy*" 2>/dev/null | head -n 1)
 fi
