@@ -90,7 +90,9 @@ cleanup() {
             sudo blockdev --flushbufs "$ALLOCATED_NBD" 2>/dev/null || true
             sudo qemu-nbd --disconnect "$ALLOCATED_NBD" 2>/dev/null || true
         fi
+        ALLOCATED_NBD=""
     fi
+    cleanup_nbd_module
 
     # 4. Release ISO mount
     if [ -n "$ISO_MOUNT_DIR" ]; then
@@ -116,6 +118,25 @@ cleanup() {
     fi
 }
 
+# Clean up unused NBD kernel module to remove unattached /dev/nbd* devices from lsblk
+cleanup_nbd_module() {
+    if [ -d /sys/module/nbd ]; then
+        local in_use=false
+        for n in /sys/block/nbd*; do
+            [ -e "$n" ] || continue
+            local sz
+            sz=$(cat "$n/size" 2>/dev/null || echo "0")
+            if [ "$sz" -gt 0 ]; then
+                in_use=true
+                break
+            fi
+        done
+        if [ "$in_use" = false ] && ! grep -q "/dev/nbd" /proc/mounts 2>/dev/null; then
+            sudo modprobe -r nbd 2>/dev/null || true
+        fi
+    fi
+}
+
 trap cleanup INT TERM HUP QUIT EXIT
 
 # XML Escape Helper
@@ -129,10 +150,13 @@ escape_xml() {
     printf '%s' "$str"
 }
 
-# Find free NBD slot
+# Find free NBD slot (uses minimal nbds_max=2 to avoid cluttering lsblk)
 find_free_nbd() {
-    sudo modprobe nbd max_part=16
-    for i in {0..15}; do
+    # If NBD is loaded with default 16 devices but none are in use, reload with minimal count
+    cleanup_nbd_module
+    sudo modprobe nbd max_part=8 nbds_max=2 2>/dev/null || sudo modprobe nbd max_part=8 2>/dev/null || true
+
+    for i in {0..7}; do
         local dev="/dev/nbd$i"
         if [ -b "$dev" ]; then
             local size
@@ -167,6 +191,9 @@ for cmd in "${REQUIRED_TOOLS[@]}"; do
         exit 1
     fi
 done
+
+# Clean up any lingering unused NBD kernel devices from previous aborted runs
+cleanup_nbd_module
 
 # Initialize configuration variables
 SRC_PATH=""
@@ -570,6 +597,7 @@ MOUNT_DIR=""
 sudo qemu-nbd --disconnect "$ALLOCATED_NBD"
 ALLOCATED_NBD=""
 sudo udevadm settle
+cleanup_nbd_module
 
 # Unmount ISO if active
 if [ -n "$ISO_MOUNT_DIR" ]; then
